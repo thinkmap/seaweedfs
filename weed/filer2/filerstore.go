@@ -2,7 +2,6 @@ package filer2
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
@@ -14,20 +13,21 @@ type FilerStore interface {
 	// GetName gets the name to locate the configuration in filer.toml file
 	GetName() string
 	// Initialize initializes the file store
-	Initialize(configuration util.Configuration) error
+	Initialize(configuration util.Configuration, prefix string) error
 	InsertEntry(context.Context, *Entry) error
 	UpdateEntry(context.Context, *Entry) (err error)
 	// err == filer2.ErrNotFound if not found
-	FindEntry(context.Context, FullPath) (entry *Entry, err error)
-	DeleteEntry(context.Context, FullPath) (err error)
-	ListDirectoryEntries(ctx context.Context, dirPath FullPath, startFileName string, includeStartFile bool, limit int) ([]*Entry, error)
+	FindEntry(context.Context, util.FullPath) (entry *Entry, err error)
+	DeleteEntry(context.Context, util.FullPath) (err error)
+	DeleteFolderChildren(context.Context, util.FullPath) (err error)
+	ListDirectoryEntries(ctx context.Context, dirPath util.FullPath, startFileName string, includeStartFile bool, limit int) ([]*Entry, error)
 
 	BeginTransaction(ctx context.Context) (context.Context, error)
 	CommitTransaction(ctx context.Context) error
 	RollbackTransaction(ctx context.Context) error
-}
 
-var ErrNotFound = errors.New("filer: no entry is found in filer store")
+	Shutdown()
+}
 
 type FilerStoreWrapper struct {
 	actualStore FilerStore
@@ -46,8 +46,8 @@ func (fsw *FilerStoreWrapper) GetName() string {
 	return fsw.actualStore.GetName()
 }
 
-func (fsw *FilerStoreWrapper) Initialize(configuration util.Configuration) error {
-	return fsw.actualStore.Initialize(configuration)
+func (fsw *FilerStoreWrapper) Initialize(configuration util.Configuration, prefix string) error {
+	return fsw.actualStore.Initialize(configuration, prefix)
 }
 
 func (fsw *FilerStoreWrapper) InsertEntry(ctx context.Context, entry *Entry) error {
@@ -72,7 +72,7 @@ func (fsw *FilerStoreWrapper) UpdateEntry(ctx context.Context, entry *Entry) err
 	return fsw.actualStore.UpdateEntry(ctx, entry)
 }
 
-func (fsw *FilerStoreWrapper) FindEntry(ctx context.Context, fp FullPath) (entry *Entry, err error) {
+func (fsw *FilerStoreWrapper) FindEntry(ctx context.Context, fp util.FullPath) (entry *Entry, err error) {
 	stats.FilerStoreCounter.WithLabelValues(fsw.actualStore.GetName(), "find").Inc()
 	start := time.Now()
 	defer func() {
@@ -87,7 +87,7 @@ func (fsw *FilerStoreWrapper) FindEntry(ctx context.Context, fp FullPath) (entry
 	return
 }
 
-func (fsw *FilerStoreWrapper) DeleteEntry(ctx context.Context, fp FullPath) (err error) {
+func (fsw *FilerStoreWrapper) DeleteEntry(ctx context.Context, fp util.FullPath) (err error) {
 	stats.FilerStoreCounter.WithLabelValues(fsw.actualStore.GetName(), "delete").Inc()
 	start := time.Now()
 	defer func() {
@@ -97,7 +97,17 @@ func (fsw *FilerStoreWrapper) DeleteEntry(ctx context.Context, fp FullPath) (err
 	return fsw.actualStore.DeleteEntry(ctx, fp)
 }
 
-func (fsw *FilerStoreWrapper) ListDirectoryEntries(ctx context.Context, dirPath FullPath, startFileName string, includeStartFile bool, limit int) ([]*Entry, error) {
+func (fsw *FilerStoreWrapper) DeleteFolderChildren(ctx context.Context, fp util.FullPath) (err error) {
+	stats.FilerStoreCounter.WithLabelValues(fsw.actualStore.GetName(), "deleteFolderChildren").Inc()
+	start := time.Now()
+	defer func() {
+		stats.FilerStoreHistogram.WithLabelValues(fsw.actualStore.GetName(), "deleteFolderChildren").Observe(time.Since(start).Seconds())
+	}()
+
+	return fsw.actualStore.DeleteFolderChildren(ctx, fp)
+}
+
+func (fsw *FilerStoreWrapper) ListDirectoryEntries(ctx context.Context, dirPath util.FullPath, startFileName string, includeStartFile bool, limit int) ([]*Entry, error) {
 	stats.FilerStoreCounter.WithLabelValues(fsw.actualStore.GetName(), "list").Inc()
 	start := time.Now()
 	defer func() {
@@ -124,4 +134,8 @@ func (fsw *FilerStoreWrapper) CommitTransaction(ctx context.Context) error {
 
 func (fsw *FilerStoreWrapper) RollbackTransaction(ctx context.Context) error {
 	return fsw.actualStore.RollbackTransaction(ctx)
+}
+
+func (fsw *FilerStoreWrapper) Shutdown() {
+	fsw.actualStore.Shutdown()
 }

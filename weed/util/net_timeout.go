@@ -35,6 +35,7 @@ type Conn struct {
 	net.Conn
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
+	isClosed     bool
 }
 
 func (c *Conn) Read(b []byte) (count int, e error) {
@@ -66,11 +67,11 @@ func (c *Conn) Write(b []byte) (count int, e error) {
 }
 
 func (c *Conn) Close() error {
-	err := c.Conn.Close()
-	if err == nil {
+	if !c.isClosed {
 		stats.ConnectionClose()
+		c.isClosed = true
 	}
-	return err
+	return c.Conn.Close()
 }
 
 func NewListener(addr string, timeout time.Duration) (net.Listener, error) {

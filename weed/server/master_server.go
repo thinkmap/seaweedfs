@@ -1,11 +1,7 @@
 package weed_server
 
 import (
-	"context"
 	"fmt"
-	"github.com/chrislusf/seaweedfs/weed/shell"
-	"github.com/chrislusf/seaweedfs/weed/wdclient"
-	"google.golang.org/grpc"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -17,14 +13,22 @@ import (
 	"time"
 
 	"github.com/chrislusf/raft"
+	"github.com/gorilla/mux"
+	"google.golang.org/grpc"
+
 	"github.com/chrislusf/seaweedfs/weed/glog"
 	"github.com/chrislusf/seaweedfs/weed/pb/master_pb"
 	"github.com/chrislusf/seaweedfs/weed/security"
 	"github.com/chrislusf/seaweedfs/weed/sequence"
+	"github.com/chrislusf/seaweedfs/weed/shell"
 	"github.com/chrislusf/seaweedfs/weed/topology"
 	"github.com/chrislusf/seaweedfs/weed/util"
-	"github.com/gorilla/mux"
-	"github.com/spf13/viper"
+	"github.com/chrislusf/seaweedfs/weed/wdclient"
+)
+
+const (
+	SequencerType     = "master.sequencer.type"
+	SequencerEtcdUrls = "master.sequencer.sequencer_etcd_urls"
 )
 
 type MasterOption struct {
@@ -57,14 +61,14 @@ type MasterServer struct {
 	clientChansLock sync.RWMutex
 	clientChans     map[string]chan *master_pb.VolumeLocation
 
-	grpcDialOpiton grpc.DialOption
+	grpcDialOption grpc.DialOption
 
 	MasterClient *wdclient.MasterClient
 }
 
 func NewMasterServer(r *mux.Router, option *MasterOption, peers []string) *MasterServer {
 
-	v := viper.GetViper()
+	v := util.GetViper()
 	signingKey := v.GetString("jwt.signing.key")
 	v.SetDefault("jwt.signing.expires_after_seconds", 10)
 	expiresAfterSec := v.GetInt("jwt.signing.expires_after_seconds")
@@ -73,22 +77,29 @@ func NewMasterServer(r *mux.Router, option *MasterOption, peers []string) *Maste
 	v.SetDefault("jwt.signing.read.expires_after_seconds", 60)
 	readExpiresAfterSec := v.GetInt("jwt.signing.read.expires_after_seconds")
 
+	v.SetDefault("master.replication.treat_replication_as_minimums", false)
+	replicationAsMin := v.GetBool("master.replication.treat_replication_as_minimums")
+
 	var preallocateSize int64
 	if option.VolumePreallocate {
 		preallocateSize = int64(option.VolumeSizeLimitMB) * (1 << 20)
 	}
 
-	grpcDialOption := security.LoadClientTLS(v.Sub("grpc"), "master")
+	grpcDialOption := security.LoadClientTLS(v, "grpc.master")
 	ms := &MasterServer{
 		option:          option,
 		preallocateSize: preallocateSize,
 		clientChans:     make(map[string]chan *master_pb.VolumeLocation),
-		grpcDialOpiton:  grpcDialOption,
-		MasterClient:    wdclient.NewMasterClient(context.Background(), grpcDialOption, "master", peers),
+		grpcDialOption:  grpcDialOption,
+		MasterClient:    wdclient.NewMasterClient(grpcDialOption, "master", 0, peers),
 	}
 	ms.bounedLeaderChan = make(chan int, 16)
-	seq := sequence.NewMemorySequencer()
-	ms.Topo = topology.NewTopology("topo", seq, uint64(ms.option.VolumeSizeLimitMB)*1024*1024, ms.option.PulseSeconds)
+
+	seq := ms.createSequencer(option)
+	if nil == seq {
+		glog.Fatalf("create sequencer failed.")
+	}
+	ms.Topo = topology.NewTopology("topo", seq, uint64(ms.option.VolumeSizeLimitMB)*1024*1024, ms.option.PulseSeconds, replicationAsMin)
 	ms.vg = topology.NewDefaultVolumeGrowth()
 	glog.V(0).Infoln("Volume Size Limit is", ms.option.VolumeSizeLimitMB, "MB")
 
@@ -106,13 +117,15 @@ func NewMasterServer(r *mux.Router, option *MasterOption, peers []string) *Maste
 		r.HandleFunc("/vol/status", ms.proxyToLeader(ms.guard.WhiteList(ms.volumeStatusHandler)))
 		r.HandleFunc("/vol/vacuum", ms.proxyToLeader(ms.guard.WhiteList(ms.volumeVacuumHandler)))
 		r.HandleFunc("/submit", ms.guard.WhiteList(ms.submitFromMasterServerHandler))
-		r.HandleFunc("/stats/health", ms.guard.WhiteList(statsHealthHandler))
-		r.HandleFunc("/stats/counter", ms.guard.WhiteList(statsCounterHandler))
-		r.HandleFunc("/stats/memory", ms.guard.WhiteList(statsMemoryHandler))
+		/*
+			r.HandleFunc("/stats/health", ms.guard.WhiteList(statsHealthHandler))
+			r.HandleFunc("/stats/counter", ms.guard.WhiteList(statsCounterHandler))
+			r.HandleFunc("/stats/memory", ms.guard.WhiteList(statsMemoryHandler))
+		*/
 		r.HandleFunc("/{fileId}", ms.redirectHandler)
 	}
 
-	ms.Topo.StartRefreshWritableVolumes(ms.grpcDialOpiton, ms.option.GarbageThreshold, ms.preallocateSize)
+	ms.Topo.StartRefreshWritableVolumes(ms.grpcDialOption, ms.option.GarbageThreshold, ms.preallocateSize)
 
 	ms.startAdminScripts()
 
@@ -165,33 +178,41 @@ func (ms *MasterServer) proxyToLeader(f func(w http.ResponseWriter, r *http.Requ
 			proxy.Transport = util.Transport
 			proxy.ServeHTTP(w, r)
 		} else {
-			//drop it to the floor
-			//writeJsonError(w, r, errors.New(ms.Topo.RaftServer.Name()+" does not know Leader yet:"+ms.Topo.RaftServer.Leader()))
+			// drop it to the floor
+			// writeJsonError(w, r, errors.New(ms.Topo.RaftServer.Name()+" does not know Leader yet:"+ms.Topo.RaftServer.Leader()))
 		}
 	}
 }
 
 func (ms *MasterServer) startAdminScripts() {
-	v := viper.GetViper()
-	adminScripts := v.GetString("master.maintenance.scripts")
-	v.SetDefault("master.maintenance.sleep_minutes", 17)
-	sleepMinutes := v.GetInt("master.maintenance.sleep_minutes")
+	var err error
 
+	v := util.GetViper()
+	adminScripts := v.GetString("master.maintenance.scripts")
 	glog.V(0).Infof("adminScripts:\n%v", adminScripts)
 	if adminScripts == "" {
 		return
 	}
+
+	v.SetDefault("master.maintenance.sleep_minutes", 17)
+	sleepMinutes := v.GetInt("master.maintenance.sleep_minutes")
+
+	v.SetDefault("master.filer.default_filer_url", "http://localhost:8888/")
+	filerURL := v.GetString("master.filer.default_filer_url")
 
 	scriptLines := strings.Split(adminScripts, "\n")
 
 	masterAddress := "localhost:" + strconv.Itoa(ms.option.Port)
 
 	var shellOptions shell.ShellOptions
-	shellOptions.GrpcDialOption = security.LoadClientTLS(viper.Sub("grpc"), "master")
+	shellOptions.GrpcDialOption = security.LoadClientTLS(v, "grpc.master")
 	shellOptions.Masters = &masterAddress
-	shellOptions.FilerHost = "localhost"
-	shellOptions.FilerPort = 8888
-	shellOptions.Directory = "/"
+
+	shellOptions.FilerHost, shellOptions.FilerPort, shellOptions.Directory, err = util.ParseFilerUrl(filerURL)
+	if err != nil {
+		glog.V(0).Infof("failed to parse master.filer.default_filer_urll=%s : %v\n", filerURL, err)
+		return
+	}
 
 	commandEnv := shell.NewCommandEnv(shellOptions)
 
@@ -203,7 +224,7 @@ func (ms *MasterServer) startAdminScripts() {
 		commandEnv.MasterClient.WaitUntilConnected()
 
 		c := time.Tick(time.Duration(sleepMinutes) * time.Minute)
-		for _ = range c {
+		for range c {
 			if ms.Topo.IsLeader() {
 				for _, line := range scriptLines {
 
@@ -229,4 +250,25 @@ func (ms *MasterServer) startAdminScripts() {
 			}
 		}
 	}()
+}
+
+func (ms *MasterServer) createSequencer(option *MasterOption) sequence.Sequencer {
+	var seq sequence.Sequencer
+	v := util.GetViper()
+	seqType := strings.ToLower(v.GetString(SequencerType))
+	glog.V(1).Infof("[%s] : [%s]", SequencerType, seqType)
+	switch strings.ToLower(seqType) {
+	case "etcd":
+		var err error
+		urls := v.GetString(SequencerEtcdUrls)
+		glog.V(0).Infof("[%s] : [%s]", SequencerEtcdUrls, urls)
+		seq, err = sequence.NewEtcdSequencer(urls, option.MetaFolder)
+		if err != nil {
+			glog.Error(err)
+			seq = nil
+		}
+	default:
+		seq = sequence.NewMemorySequencer()
+	}
+	return seq
 }

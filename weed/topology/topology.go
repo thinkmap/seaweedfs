@@ -7,11 +7,13 @@ import (
 	"sync"
 
 	"github.com/chrislusf/raft"
+
 	"github.com/chrislusf/seaweedfs/weed/glog"
 	"github.com/chrislusf/seaweedfs/weed/pb/master_pb"
 	"github.com/chrislusf/seaweedfs/weed/sequence"
 	"github.com/chrislusf/seaweedfs/weed/storage"
 	"github.com/chrislusf/seaweedfs/weed/storage/needle"
+	"github.com/chrislusf/seaweedfs/weed/storage/super_block"
 	"github.com/chrislusf/seaweedfs/weed/util"
 )
 
@@ -25,7 +27,8 @@ type Topology struct {
 
 	pulse int64
 
-	volumeSizeLimit uint64
+	volumeSizeLimit  uint64
+	replicationAsMin bool
 
 	Sequence sequence.Sequencer
 
@@ -36,7 +39,7 @@ type Topology struct {
 	RaftServer raft.Server
 }
 
-func NewTopology(id string, seq sequence.Sequencer, volumeSizeLimit uint64, pulse int) *Topology {
+func NewTopology(id string, seq sequence.Sequencer, volumeSizeLimit uint64, pulse int, replicationAsMin bool) *Topology {
 	t := &Topology{}
 	t.id = NodeId(id)
 	t.nodeType = "Topology"
@@ -46,6 +49,7 @@ func NewTopology(id string, seq sequence.Sequencer, volumeSizeLimit uint64, puls
 	t.ecShardMap = make(map[needle.VolumeId]*EcShardLocations)
 	t.pulse = int64(pulse)
 	t.volumeSizeLimit = volumeSizeLimit
+	t.replicationAsMin = replicationAsMin
 
 	t.Sequence = seq
 
@@ -58,7 +62,12 @@ func NewTopology(id string, seq sequence.Sequencer, volumeSizeLimit uint64, puls
 
 func (t *Topology) IsLeader() bool {
 	if t.RaftServer != nil {
-		return t.RaftServer.State() == raft.Leader
+		if t.RaftServer.State() == raft.Leader {
+			return true
+		}
+		if t.RaftServer.Leader() == "" {
+			return true
+		}
 	}
 	return false
 }
@@ -73,7 +82,7 @@ func (t *Topology) Leader() (string, error) {
 
 	if l == "" {
 		// We are a single node cluster, we are the leader
-		return t.RaftServer.Name(), errors.New("Raft Server not initialized!")
+		return t.RaftServer.Name(), nil
 	}
 
 	return l, nil
@@ -120,18 +129,18 @@ func (t *Topology) HasWritableVolume(option *VolumeGrowOption) bool {
 func (t *Topology) PickForWrite(count uint64, option *VolumeGrowOption) (string, uint64, *DataNode, error) {
 	vid, count, datanodes, err := t.GetVolumeLayout(option.Collection, option.ReplicaPlacement, option.Ttl).PickForWrite(count, option)
 	if err != nil {
-		return "", 0, nil, fmt.Errorf("failed to find writable volumes for collectio:%s replication:%s ttl:%s error: %v", option.Collection, option.ReplicaPlacement.String(), option.Ttl.String(), err)
+		return "", 0, nil, fmt.Errorf("failed to find writable volumes for collection:%s replication:%s ttl:%s error: %v", option.Collection, option.ReplicaPlacement.String(), option.Ttl.String(), err)
 	}
 	if datanodes.Length() == 0 {
-		return "", 0, nil, fmt.Errorf("no writable volumes available for for collectio:%s replication:%s ttl:%s", option.Collection, option.ReplicaPlacement.String(), option.Ttl.String())
+		return "", 0, nil, fmt.Errorf("no writable volumes available for collection:%s replication:%s ttl:%s", option.Collection, option.ReplicaPlacement.String(), option.Ttl.String())
 	}
-	fileId, count := t.Sequence.NextFileId(count)
+	fileId := t.Sequence.NextFileId(count)
 	return needle.NewFileId(*vid, fileId, rand.Uint32()).String(), count, datanodes.Head(), nil
 }
 
-func (t *Topology) GetVolumeLayout(collectionName string, rp *storage.ReplicaPlacement, ttl *needle.TTL) *VolumeLayout {
+func (t *Topology) GetVolumeLayout(collectionName string, rp *super_block.ReplicaPlacement, ttl *needle.TTL) *VolumeLayout {
 	return t.collectionMap.Get(collectionName, func() interface{} {
-		return NewCollection(collectionName, t.volumeSizeLimit)
+		return NewCollection(collectionName, t.volumeSizeLimit, t.replicationAsMin)
 	}).(*Collection).GetOrCreateVolumeLayout(rp, ttl)
 }
 
@@ -150,7 +159,7 @@ func (t *Topology) ListCollections(includeNormalVolumes, includeEcVolumes bool) 
 		t.ecShardMapLock.RUnlock()
 	}
 
-	for k, _ := range mapOfCollections {
+	for k := range mapOfCollections {
 		ret = append(ret, k)
 	}
 	return ret

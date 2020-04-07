@@ -1,18 +1,18 @@
 package shell
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"net/url"
-	"path/filepath"
 	"strconv"
 	"strings"
 
-	"github.com/chrislusf/seaweedfs/weed/filer2"
-	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
-	"github.com/chrislusf/seaweedfs/weed/wdclient"
 	"google.golang.org/grpc"
+
+	"github.com/chrislusf/seaweedfs/weed/pb"
+	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
+	"github.com/chrislusf/seaweedfs/weed/util"
+	"github.com/chrislusf/seaweedfs/weed/wdclient"
 )
 
 type ShellOptions struct {
@@ -42,61 +42,52 @@ var (
 
 func NewCommandEnv(options ShellOptions) *CommandEnv {
 	return &CommandEnv{
-		env: make(map[string]string),
-		MasterClient: wdclient.NewMasterClient(context.Background(),
-			options.GrpcDialOption, "shell", strings.Split(*options.Masters, ",")),
-		option: options,
+		env:          make(map[string]string),
+		MasterClient: wdclient.NewMasterClient(options.GrpcDialOption, "shell", 0, strings.Split(*options.Masters, ",")),
+		option:       options,
 	}
 }
 
-func (ce *CommandEnv) parseUrl(input string) (filerServer string, filerPort int64, path string, err error) {
+func (ce *CommandEnv) parseUrl(input string) (path string, err error) {
 	if strings.HasPrefix(input, "http") {
-		return parseFilerUrl(input)
+		err = fmt.Errorf("http://<filer>:<port> prefix is not supported any more")
+		return
 	}
 	if !strings.HasPrefix(input, "/") {
-		input = filepath.ToSlash(filepath.Join(ce.option.Directory, input))
+		input = util.Join(ce.option.Directory, input)
 	}
-	return ce.option.FilerHost, ce.option.FilerPort, input, err
+	return input, err
 }
 
-func (ce *CommandEnv) isDirectory(ctx context.Context, filerServer string, filerPort int64, path string) bool {
+func (ce *CommandEnv) isDirectory(path string) bool {
 
-	return ce.checkDirectory(ctx, filerServer, filerPort, path) == nil
+	return ce.checkDirectory(path) == nil
 
 }
 
-func (ce *CommandEnv) checkDirectory(ctx context.Context, filerServer string, filerPort int64, path string) error {
+func (ce *CommandEnv) checkDirectory(path string) error {
 
-	dir, name := filer2.FullPath(path).DirAndName()
+	dir, name := util.FullPath(path).DirAndName()
 
-	return ce.withFilerClient(ctx, filerServer, filerPort, func(client filer_pb.SeaweedFilerClient) error {
+	exists, err := filer_pb.Exists(ce, dir, name, true)
 
-		resp, listErr := client.ListEntries(ctx, &filer_pb.ListEntriesRequest{
-			Directory:          dir,
-			Prefix:             name,
-			StartFromFileName:  name,
-			InclusiveStartFrom: true,
-			Limit:              1,
-		})
-		if listErr != nil {
-			return listErr
-		}
+	if !exists {
+		return fmt.Errorf("%s is not a directory", path)
+	}
 
-		if len(resp.Entries) == 0 {
-			return fmt.Errorf("entry not found")
-		}
+	return err
 
-		if resp.Entries[0].Name != name {
-			return fmt.Errorf("not a valid directory, found %s", resp.Entries[0].Name)
-		}
+}
 
-		if !resp.Entries[0].IsDirectory {
-			return fmt.Errorf("not a directory")
-		}
+func (ce *CommandEnv) WithFilerClient(fn func(filer_pb.SeaweedFilerClient) error) error {
 
-		return nil
-	})
+	filerGrpcAddress := fmt.Sprintf("%s:%d", ce.option.FilerHost, ce.option.FilerPort+10000)
+	return pb.WithGrpcFilerClient(filerGrpcAddress, ce.option.GrpcDialOption, fn)
 
+}
+
+func (ce *CommandEnv) AdjustedUrl(hostAndPort string) string {
+	return hostAndPort
 }
 
 func parseFilerUrl(entryPath string) (filerServer string, filerPort int64, path string, err error) {
@@ -113,7 +104,7 @@ func parseFilerUrl(entryPath string) (filerServer string, filerPort int64, path 
 		}
 		path = u.Path
 	} else {
-		err = fmt.Errorf("path should have full url http://<filer_server>:<port>/path/to/dirOrFile : %s", entryPath)
+		err = fmt.Errorf("path should have full url /path/to/dirOrFile : %s", entryPath)
 	}
 	return
 }

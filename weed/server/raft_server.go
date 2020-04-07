@@ -2,8 +2,6 @@ package weed_server
 
 import (
 	"encoding/json"
-	"github.com/chrislusf/seaweedfs/weed/util"
-	"google.golang.org/grpc"
 	"io/ioutil"
 	"os"
 	"path"
@@ -11,7 +9,12 @@ import (
 	"sort"
 	"time"
 
+	"google.golang.org/grpc"
+
+	"github.com/chrislusf/seaweedfs/weed/pb"
+
 	"github.com/chrislusf/raft"
+
 	"github.com/chrislusf/seaweedfs/weed/glog"
 	"github.com/chrislusf/seaweedfs/weed/topology"
 )
@@ -25,7 +28,7 @@ type RaftServer struct {
 	*raft.GrpcServer
 }
 
-func NewRaftServer(grpcDialOption grpc.DialOption, peers []string, serverAddr string, dataDir string, topo *topology.Topology, pulseSeconds int) *RaftServer {
+func NewRaftServer(grpcDialOption grpc.DialOption, peers []string, serverAddr, dataDir string, topo *topology.Topology, pulseSeconds int) *RaftServer {
 	s := &RaftServer{
 		peers:      peers,
 		serverAddr: serverAddr,
@@ -61,7 +64,7 @@ func NewRaftServer(grpcDialOption grpc.DialOption, peers []string, serverAddr st
 	s.raftServer.Start()
 
 	for _, peer := range s.peers {
-		s.raftServer.AddPeer(peer, util.ServerToGrpcAddress(peer))
+		s.raftServer.AddPeer(peer, pb.ServerToGrpcAddress(peer))
 	}
 
 	s.GrpcServer = raft.NewGrpcServer(s.raftServer)
@@ -72,7 +75,7 @@ func NewRaftServer(grpcDialOption grpc.DialOption, peers []string, serverAddr st
 
 		_, err := s.raftServer.Do(&raft.DefaultJoinCommand{
 			Name:             s.raftServer.Name(),
-			ConnectionString: util.ServerToGrpcAddress(s.serverAddr),
+			ConnectionString: pb.ServerToGrpcAddress(s.serverAddr),
 		})
 
 		if err != nil {

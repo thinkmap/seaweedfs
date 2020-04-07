@@ -6,11 +6,9 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/chrislusf/seaweedfs/weed/operation"
 	"github.com/chrislusf/seaweedfs/weed/security"
 	"github.com/chrislusf/seaweedfs/weed/util"
-	"github.com/spf13/viper"
-
-	"github.com/chrislusf/seaweedfs/weed/operation"
 )
 
 var (
@@ -18,14 +16,15 @@ var (
 )
 
 type UploadOptions struct {
-	master      *string
-	dir         *string
-	include     *string
-	replication *string
-	collection  *string
-	dataCenter  *string
-	ttl         *string
-	maxMB       *int
+	master       *string
+	dir          *string
+	include      *string
+	replication  *string
+	collection   *string
+	dataCenter   *string
+	ttl          *string
+	maxMB        *int
+	usePublicUrl *bool
 }
 
 func init() {
@@ -39,6 +38,7 @@ func init() {
 	upload.dataCenter = cmdUpload.Flag.String("dataCenter", "", "optional data center name")
 	upload.ttl = cmdUpload.Flag.String("ttl", "", "time to live, e.g.: 1m, 1h, 1d, 1M, 1y")
 	upload.maxMB = cmdUpload.Flag.Int("maxMB", 32, "split files larger than the limit")
+	upload.usePublicUrl = cmdUpload.Flag.Bool("usePublicUrl", false, "upload to public url from volume server")
 }
 
 var cmdUpload = &Command{
@@ -63,7 +63,7 @@ var cmdUpload = &Command{
 func runUpload(cmd *Command, args []string) bool {
 
 	util.LoadConfiguration("security", false)
-	grpcDialOption := security.LoadClientTLS(viper.Sub("grpc"), "client")
+	grpcDialOption := security.LoadClientTLS(util.GetViper(), "grpc.client")
 
 	if len(args) == 0 {
 		if *upload.dir == "" {
@@ -81,9 +81,7 @@ func runUpload(cmd *Command, args []string) bool {
 					if e != nil {
 						return e
 					}
-					results, e := operation.SubmitFiles(*upload.master, grpcDialOption, parts,
-						*upload.replication, *upload.collection, *upload.dataCenter,
-						*upload.ttl, *upload.maxMB)
+					results, e := operation.SubmitFiles(*upload.master, grpcDialOption, parts, *upload.replication, *upload.collection, *upload.dataCenter, *upload.ttl, *upload.maxMB, *upload.usePublicUrl)
 					bytes, _ := json.Marshal(results)
 					fmt.Println(string(bytes))
 					if e != nil {
@@ -100,9 +98,7 @@ func runUpload(cmd *Command, args []string) bool {
 		if e != nil {
 			fmt.Println(e.Error())
 		}
-		results, _ := operation.SubmitFiles(*upload.master, grpcDialOption, parts,
-			*upload.replication, *upload.collection, *upload.dataCenter,
-			*upload.ttl, *upload.maxMB)
+		results, _ := operation.SubmitFiles(*upload.master, grpcDialOption, parts, *upload.replication, *upload.collection, *upload.dataCenter, *upload.ttl, *upload.maxMB, *upload.usePublicUrl)
 		bytes, _ := json.Marshal(results)
 		fmt.Println(string(bytes))
 	}

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
+	"github.com/chrislusf/seaweedfs/weed/util"
 )
 
 type Attr struct {
@@ -27,9 +28,10 @@ func (attr Attr) IsDirectory() bool {
 }
 
 type Entry struct {
-	FullPath
+	util.FullPath
 
 	Attr
+	Extended map[string][]byte
 
 	// the following is for files
 	Chunks []*filer_pb.FileChunk `json:"chunks,omitempty"`
@@ -56,6 +58,7 @@ func (entry *Entry) ToProtoEntry() *filer_pb.Entry {
 		IsDirectory: entry.IsDirectory(),
 		Attributes:  EntryAttributeToPb(entry),
 		Chunks:      entry.Chunks,
+		Extended:    entry.Extended,
 	}
 }
 

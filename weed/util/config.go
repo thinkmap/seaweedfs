@@ -1,17 +1,19 @@
 package util
 
 import (
-	"github.com/chrislusf/seaweedfs/weed/glog"
+	"strings"
+
 	"github.com/spf13/viper"
+
+	"github.com/chrislusf/seaweedfs/weed/glog"
 )
 
 type Configuration interface {
 	GetString(key string) string
 	GetBool(key string) bool
 	GetInt(key string) int
-	GetInt64(key string) int64
-	GetFloat64(key string) float64
 	GetStringSlice(key string) []string
+	SetDefault(key string, value interface{})
 }
 
 func LoadConfiguration(configFileName string, required bool) (loaded bool) {
@@ -25,13 +27,10 @@ func LoadConfiguration(configFileName string, required bool) (loaded bool) {
 	glog.V(1).Infof("Reading %s.toml from %s", configFileName, viper.ConfigFileUsed())
 
 	if err := viper.MergeInConfig(); err != nil { // Handle errors reading the config file
-		glog.V(0).Infof("Reading %s: %v", viper.ConfigFileUsed(), err)
+		glog.V(1).Infof("Reading %s: %v", viper.ConfigFileUsed(), err)
 		if required {
 			glog.Fatalf("Failed to load %s.toml file from current directory, or $HOME/.seaweedfs/, or /etc/seaweedfs/"+
-				"\n\nPlease follow this example and add a filer.toml file to "+
-				"current directory, or $HOME/.seaweedfs/, or /etc/seaweedfs/:\n"+
-				"    https://github.com/chrislusf/seaweedfs/blob/master/weed/%s.toml\n"+
-				"\nOr use this command to generate the default toml file\n"+
+				"\n\nPlease use this command to generate the default %s.toml file\n"+
 				"    weed scaffold -config=%s -output=.\n\n\n",
 				configFileName, configFileName, configFileName)
 		} else {
@@ -40,5 +39,12 @@ func LoadConfiguration(configFileName string, required bool) (loaded bool) {
 	}
 
 	return true
+}
 
+func GetViper() *viper.Viper {
+	v := viper.GetViper()
+	v.AutomaticEnv()
+	v.SetEnvPrefix("weed")
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	return v
 }

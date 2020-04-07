@@ -1,17 +1,18 @@
 package shell
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/chrislusf/seaweedfs/weed/filer2"
+	"github.com/golang/protobuf/proto"
+
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
 	"github.com/chrislusf/seaweedfs/weed/util"
-	"github.com/golang/protobuf/proto"
 )
 
 func init() {
@@ -37,8 +38,6 @@ func (c *commandFsMetaSave) Help() string {
 	The meta data will be saved into a local <filer_host>-<port>-<time>.meta file.
 	These meta data can be later loaded by fs.meta.load command, 
 
-	This assumes there are no deletions, so this is different from taking a snapshot.
-
 `
 }
 
@@ -47,118 +46,151 @@ func (c *commandFsMetaSave) Do(args []string, commandEnv *CommandEnv, writer io.
 	fsMetaSaveCommand := flag.NewFlagSet(c.Name(), flag.ContinueOnError)
 	verbose := fsMetaSaveCommand.Bool("v", false, "print out each processed files")
 	outputFileName := fsMetaSaveCommand.String("o", "", "output the meta data to this file")
+	// chunksFileName := fsMetaSaveCommand.String("chunks", "", "output all the chunks to this file")
 	if err = fsMetaSaveCommand.Parse(args); err != nil {
 		return nil
 	}
 
-	filerServer, filerPort, path, err := commandEnv.parseUrl(findInputDirectory(fsMetaSaveCommand.Args()))
-	if err != nil {
-		return err
+	path, parseErr := commandEnv.parseUrl(findInputDirectory(fsMetaSaveCommand.Args()))
+	if parseErr != nil {
+		return parseErr
 	}
 
-	ctx := context.Background()
-
-	return commandEnv.withFilerClient(ctx, filerServer, filerPort, func(client filer_pb.SeaweedFilerClient) error {
-
+	fileName := *outputFileName
+	if fileName == "" {
 		t := time.Now()
-		fileName := *outputFileName
-		if fileName == "" {
-			fileName = fmt.Sprintf("%s-%d-%4d%02d%02d-%02d%02d%02d.meta",
-				filerServer, filerPort, t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second())
-		}
+		fileName = fmt.Sprintf("%s-%d-%4d%02d%02d-%02d%02d%02d.meta",
+			commandEnv.option.FilerHost, commandEnv.option.FilerPort, t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second())
+	}
 
-		dst, err := os.OpenFile(fileName, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
-		if err != nil {
-			return nil
-		}
-		defer dst.Close()
+	dst, openErr := os.OpenFile(fileName, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if openErr != nil {
+		return fmt.Errorf("failed to create file %s: %v", fileName, openErr)
+	}
+	defer dst.Close()
 
-		var dirCount, fileCount uint64
-
+	err = doTraverseBfsAndSaving(commandEnv, writer, path, *verbose, func(outputChan chan interface{}) {
 		sizeBuf := make([]byte, 4)
-
-		err = doTraverse(ctx, writer, client, filer2.FullPath(path), func(parentPath filer2.FullPath, entry *filer_pb.Entry) error {
-
-			protoMessage := &filer_pb.FullEntry{
-				Dir:   string(parentPath),
-				Entry: entry,
-			}
-
-			bytes, err := proto.Marshal(protoMessage)
-			if err != nil {
-				return fmt.Errorf("marshall error: %v", err)
-			}
-
-			util.Uint32toBytes(sizeBuf, uint32(len(bytes)))
-
+		for item := range outputChan {
+			b := item.([]byte)
+			util.Uint32toBytes(sizeBuf, uint32(len(b)))
 			dst.Write(sizeBuf)
-			dst.Write(bytes)
-
-			if entry.IsDirectory {
-				dirCount++
-			} else {
-				fileCount++
-			}
-
-			if *verbose {
-				println(parentPath.Child(entry.Name))
-			}
-
-			return nil
-
-		})
-
-		if err == nil {
-			fmt.Fprintf(writer, "\ntotal %d directories, %d files", dirCount, fileCount)
-			fmt.Fprintf(writer, "\nmeta data for http://%s:%d%s is saved to %s\n", filerServer, filerPort, path, fileName)
+			dst.Write(b)
 		}
-
-		return err
-
-	})
-
-}
-func doTraverse(ctx context.Context, writer io.Writer, client filer_pb.SeaweedFilerClient, parentPath filer2.FullPath, fn func(parentPath filer2.FullPath, entry *filer_pb.Entry) error) (err error) {
-
-	paginatedCount := -1
-	startFromFileName := ""
-	paginateSize := 1000
-
-	for paginatedCount == -1 || paginatedCount == paginateSize {
-		resp, listErr := client.ListEntries(ctx, &filer_pb.ListEntriesRequest{
-			Directory:          string(parentPath),
-			Prefix:             "",
-			StartFromFileName:  startFromFileName,
-			InclusiveStartFrom: false,
-			Limit:              uint32(paginateSize),
-		})
-		if listErr != nil {
-			err = listErr
+	}, func(entry *filer_pb.FullEntry, outputChan chan interface{}) (err error) {
+		bytes, err := proto.Marshal(entry)
+		if err != nil {
+			fmt.Fprintf(writer, "marshall error: %v\n", err)
 			return
 		}
 
-		paginatedCount = len(resp.Entries)
+		outputChan <- bytes
+		return nil
+	})
 
-		for _, entry := range resp.Entries {
-
-			if err = fn(parentPath, entry); err != nil {
-				return err
-			}
-
-			if entry.IsDirectory {
-				subDir := fmt.Sprintf("%s/%s", parentPath, entry.Name)
-				if parentPath == "/" {
-					subDir = "/" + entry.Name
-				}
-				if err = doTraverse(ctx, writer, client, filer2.FullPath(subDir), fn); err != nil {
-					return err
-				}
-			}
-			startFromFileName = entry.Name
-
-		}
+	if err == nil {
+		fmt.Fprintf(writer, "meta data for http://%s:%d%s is saved to %s\n", commandEnv.option.FilerHost, commandEnv.option.FilerPort, path, fileName)
 	}
 
+	return err
+
+}
+
+func doTraverseBfsAndSaving(commandEnv *CommandEnv, writer io.Writer, path string, verbose bool, saveFn func(outputChan chan interface{}), genFn func(entry *filer_pb.FullEntry, outputChan chan interface{}) error) error {
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	outputChan := make(chan interface{}, 1024)
+	go func() {
+		saveFn(outputChan)
+		wg.Done()
+	}()
+
+	var dirCount, fileCount uint64
+
+	err := doTraverseBfs(writer, commandEnv, util.FullPath(path), func(parentPath util.FullPath, entry *filer_pb.Entry) {
+
+		protoMessage := &filer_pb.FullEntry{
+			Dir:   string(parentPath),
+			Entry: entry,
+		}
+
+		if err := genFn(protoMessage, outputChan); err != nil {
+			fmt.Fprintf(writer, "marshall error: %v\n", err)
+			return
+		}
+
+		if entry.IsDirectory {
+			atomic.AddUint64(&dirCount, 1)
+		} else {
+			atomic.AddUint64(&fileCount, 1)
+		}
+
+		if verbose {
+			println(parentPath.Child(entry.Name))
+		}
+
+	})
+
+	close(outputChan)
+
+	wg.Wait()
+
+	if err == nil && writer != nil {
+		fmt.Fprintf(writer, "total %d directories, %d files\n", dirCount, fileCount)
+	}
+	return err
+}
+
+func doTraverseBfs(writer io.Writer, filerClient filer_pb.FilerClient, parentPath util.FullPath, fn func(parentPath util.FullPath, entry *filer_pb.Entry)) (err error) {
+
+	K := 5
+
+	var jobQueueWg sync.WaitGroup
+	queue := util.NewQueue()
+	jobQueueWg.Add(1)
+	queue.Enqueue(parentPath)
+	var isTerminating bool
+
+	for i := 0; i < K; i++ {
+		go func() {
+			for {
+				if isTerminating {
+					break
+				}
+				t := queue.Dequeue()
+				if t == nil {
+					time.Sleep(329 * time.Millisecond)
+					continue
+				}
+				dir := t.(util.FullPath)
+				processErr := processOneDirectory(writer, filerClient, dir, queue, &jobQueueWg, fn)
+				if processErr != nil {
+					err = processErr
+				}
+				jobQueueWg.Done()
+			}
+		}()
+	}
+	jobQueueWg.Wait()
+	isTerminating = true
 	return
+}
+
+func processOneDirectory(writer io.Writer, filerClient filer_pb.FilerClient, parentPath util.FullPath, queue *util.Queue, jobQueueWg *sync.WaitGroup, fn func(parentPath util.FullPath, entry *filer_pb.Entry)) (err error) {
+
+	return filer_pb.ReadDirAllEntries(filerClient, parentPath, "", func(entry *filer_pb.Entry, isLast bool) {
+
+		fn(parentPath, entry)
+
+		if entry.IsDirectory {
+			subDir := fmt.Sprintf("%s/%s", parentPath, entry.Name)
+			if parentPath == "/" {
+				subDir = "/" + entry.Name
+			}
+			jobQueueWg.Add(1)
+			queue.Enqueue(util.FullPath(subDir))
+		}
+	})
 
 }

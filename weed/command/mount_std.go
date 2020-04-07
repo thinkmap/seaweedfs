@@ -1,8 +1,9 @@
-// +build linux darwin
+// +build linux darwin freebsd
 
 package command
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/user"
@@ -12,12 +13,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/chrislusf/seaweedfs/weed/security"
-	"github.com/jacobsa/daemonize"
-	"github.com/spf13/viper"
-
 	"github.com/chrislusf/seaweedfs/weed/filesys"
 	"github.com/chrislusf/seaweedfs/weed/glog"
+	"github.com/chrislusf/seaweedfs/weed/pb"
+	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
+	"github.com/chrislusf/seaweedfs/weed/security"
 	"github.com/chrislusf/seaweedfs/weed/util"
 	"github.com/seaweedfs/fuse"
 	"github.com/seaweedfs/fuse/fs"
@@ -33,23 +33,38 @@ func runMount(cmd *Command, args []string) bool {
 		return false
 	}
 
-	return RunMount(
-		*mountOptions.filer,
-		*mountOptions.filerMountRootPath,
-		*mountOptions.dir,
-		*mountOptions.collection,
-		*mountOptions.replication,
-		*mountOptions.dataCenter,
-		*mountOptions.chunkSizeLimitMB,
-		*mountOptions.allowOthers,
-		*mountOptions.ttlSec,
-		*mountOptions.dirListingLimit,
-		os.FileMode(umask),
-	)
+	return RunMount(&mountOptions, os.FileMode(umask))
 }
 
-func RunMount(filer, filerMountRootPath, dir, collection, replication, dataCenter string, chunkSizeLimitMB int,
-	allowOthers bool, ttlSec int, dirListingLimit int, umask os.FileMode) bool {
+func RunMount(option *MountOptions, umask os.FileMode) bool {
+
+	filer := *option.filer
+	// parse filer grpc address
+	filerGrpcAddress, err := pb.ParseFilerGrpcAddress(filer)
+	if err != nil {
+		glog.V(0).Infof("ParseFilerGrpcAddress: %v", err)
+		return true
+	}
+
+	// try to connect to filer, filerBucketsPath may be useful later
+	grpcDialOption := security.LoadClientTLS(util.GetViper(), "grpc.client")
+	var cipher bool
+	err = pb.WithGrpcFilerClient(filerGrpcAddress, grpcDialOption, func(client filer_pb.SeaweedFilerClient) error {
+		resp, err := client.GetFilerConfiguration(context.Background(), &filer_pb.GetFilerConfigurationRequest{})
+		if err != nil {
+			return fmt.Errorf("get filer grpc address %s configuration: %v", filerGrpcAddress, err)
+		}
+		cipher = resp.Cipher
+		return nil
+	})
+	if err != nil {
+		glog.Infof("failed to talk to filer %s: %v", filerGrpcAddress, err)
+		return true
+	}
+
+	filerMountRootPath := *option.filerMountRootPath
+	dir := *option.dir
+	chunkSizeLimitMB := *mountOptions.chunkSizeLimitMB
 
 	util.LoadConfiguration("security", false)
 
@@ -88,13 +103,19 @@ func RunMount(filer, filerMountRootPath, dir, collection, replication, dataCente
 		}
 	}
 
+	// Ensure target mount point availability
+	if isValid := checkMountPointAvailable(dir); !isValid {
+		glog.Fatalf("Expected mount to still be active, target mount point: %s, please check!", dir)
+		return true
+	}
+
 	mountName := path.Base(dir)
 
 	options := []fuse.MountOption{
 		fuse.VolumeName(mountName),
-		fuse.FSName("SeaweedFS"),
-		fuse.Subtype("SeaweedFS"),
-		fuse.NoAppleDouble(),
+		fuse.FSName(filer + ":" + filerMountRootPath),
+		fuse.Subtype("seaweedfs"),
+		// fuse.NoAppleDouble(), // include .DS_Store, otherwise can not delete non-empty folders
 		fuse.NoAppleXattr(),
 		fuse.NoBrowse(),
 		fuse.AutoXattr(),
@@ -105,65 +126,63 @@ func RunMount(filer, filerMountRootPath, dir, collection, replication, dataCente
 		fuse.MaxReadahead(1024 * 128),
 		fuse.AsyncRead(),
 		fuse.WritebackCache(),
-		fuse.AllowNonEmptyMount(),
 	}
-	if allowOthers {
+
+	options = append(options, osSpecificMountOptions()...)
+
+	if *option.allowOthers {
 		options = append(options, fuse.AllowOther())
+	}
+	if *option.nonempty {
+		options = append(options, fuse.AllowNonEmptyMount())
 	}
 
 	c, err := fuse.Mount(dir, options...)
 	if err != nil {
-		glog.Fatal(err)
-		daemonize.SignalOutcome(err)
-		return false
+		glog.V(0).Infof("mount: %v", err)
+		return true
 	}
+
+	defer fuse.Unmount(dir)
 
 	util.OnInterrupt(func() {
 		fuse.Unmount(dir)
 		c.Close()
 	})
 
-	filerGrpcAddress, err := parseFilerGrpcAddress(filer)
-	if err != nil {
-		glog.Fatal(err)
-		daemonize.SignalOutcome(err)
-		return false
-	}
-
+	// find mount point
 	mountRoot := filerMountRootPath
 	if mountRoot != "/" && strings.HasSuffix(mountRoot, "/") {
 		mountRoot = mountRoot[0 : len(mountRoot)-1]
 	}
 
-	daemonize.SignalOutcome(nil)
-
 	err = fs.Serve(c, filesys.NewSeaweedFileSystem(&filesys.Option{
-		FilerGrpcAddress:   filerGrpcAddress,
-		GrpcDialOption:     security.LoadClientTLS(viper.Sub("grpc"), "client"),
-		FilerMountRootPath: mountRoot,
-		Collection:         collection,
-		Replication:        replication,
-		TtlSec:             int32(ttlSec),
-		ChunkSizeLimit:     int64(chunkSizeLimitMB) * 1024 * 1024,
-		DataCenter:         dataCenter,
-		DirListingLimit:    dirListingLimit,
-		EntryCacheTtl:      3 * time.Second,
-		MountUid:           uid,
-		MountGid:           gid,
-		MountMode:          mountMode,
-		MountCtime:         fileInfo.ModTime(),
-		MountMtime:         time.Now(),
-		Umask:              umask,
+		FilerGrpcAddress:            filerGrpcAddress,
+		GrpcDialOption:              grpcDialOption,
+		FilerMountRootPath:          mountRoot,
+		Collection:                  *option.collection,
+		Replication:                 *option.replication,
+		TtlSec:                      int32(*option.ttlSec),
+		ChunkSizeLimit:              int64(chunkSizeLimitMB) * 1024 * 1024,
+		ChunkCacheCountLimit:        *option.chunkCacheCountLimit,
+		DataCenter:                  *option.dataCenter,
+		DirListCacheLimit:           *option.dirListCacheLimit,
+		EntryCacheTtl:               3 * time.Second,
+		MountUid:                    uid,
+		MountGid:                    gid,
+		MountMode:                   mountMode,
+		MountCtime:                  fileInfo.ModTime(),
+		MountMtime:                  time.Now(),
+		Umask:                       umask,
+		OutsideContainerClusterMode: *mountOptions.outsideContainerClusterMode,
+		Cipher:                      cipher,
 	}))
-	if err != nil {
-		fuse.Unmount(dir)
-	}
 
 	// check if the mount process has an error to report
 	<-c.Ready
 	if err := c.MountError; err != nil {
-		glog.Fatal(err)
-		daemonize.SignalOutcome(err)
+		glog.V(0).Infof("mount process: %v", err)
+		return true
 	}
 
 	return true

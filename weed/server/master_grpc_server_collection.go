@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/chrislusf/raft"
+
 	"github.com/chrislusf/seaweedfs/weed/operation"
 	"github.com/chrislusf/seaweedfs/weed/pb/master_pb"
 	"github.com/chrislusf/seaweedfs/weed/pb/volume_server_pb"
@@ -57,7 +58,7 @@ func (ms *MasterServer) doDeleteNormalCollection(collectionName string) error {
 	}
 
 	for _, server := range collection.ListVolumeServers() {
-		err := operation.WithVolumeServerClient(server.Url(), ms.grpcDialOpiton, func(client volume_server_pb.VolumeServerClient) error {
+		err := operation.WithVolumeServerClient(server.Url(), ms.grpcDialOption, func(client volume_server_pb.VolumeServerClient) error {
 			_, deleteErr := client.DeleteCollection(context.Background(), &volume_server_pb.DeleteCollectionRequest{
 				Collection: collectionName,
 			})
@@ -77,7 +78,7 @@ func (ms *MasterServer) doDeleteEcCollection(collectionName string) error {
 	listOfEcServers := ms.Topo.ListEcServersByCollection(collectionName)
 
 	for _, server := range listOfEcServers {
-		err := operation.WithVolumeServerClient(server, ms.grpcDialOpiton, func(client volume_server_pb.VolumeServerClient) error {
+		err := operation.WithVolumeServerClient(server, ms.grpcDialOption, func(client volume_server_pb.VolumeServerClient) error {
 			_, deleteErr := client.DeleteCollection(context.Background(), &volume_server_pb.DeleteCollectionRequest{
 				Collection: collectionName,
 			})

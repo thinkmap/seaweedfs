@@ -2,8 +2,10 @@ package filesys
 
 import (
 	"context"
-	"fmt"
+
+	"github.com/chrislusf/seaweedfs/weed/glog"
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
+	"github.com/chrislusf/seaweedfs/weed/util"
 	"github.com/seaweedfs/fuse"
 	"github.com/seaweedfs/fuse/fs"
 )
@@ -12,22 +14,38 @@ func (dir *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDirector
 
 	newDir := newDirectory.(*Dir)
 
-	return dir.wfs.WithFilerClient(ctx, func(client filer_pb.SeaweedFilerClient) error {
+	newPath := util.NewFullPath(newDir.FullPath(), req.NewName)
+	oldPath := util.NewFullPath(dir.FullPath(), req.OldName)
+
+	glog.V(4).Infof("dir Rename %s => %s", oldPath, newPath)
+
+	err := dir.wfs.WithFilerClient(func(client filer_pb.SeaweedFilerClient) error {
 
 		request := &filer_pb.AtomicRenameEntryRequest{
-			OldDirectory: dir.Path,
+			OldDirectory: dir.FullPath(),
 			OldName:      req.OldName,
-			NewDirectory: newDir.Path,
+			NewDirectory: newDir.FullPath(),
 			NewName:      req.NewName,
 		}
 
-		_, err := client.AtomicRenameEntry(ctx, request)
+		_, err := client.AtomicRenameEntry(context.Background(), request)
 		if err != nil {
-			return fmt.Errorf("renaming %s/%s => %s/%s: %v", dir.Path, req.OldName, newDir.Path, req.NewName, err)
+			glog.V(0).Infof("dir Rename %s => %s : %v", oldPath, newPath, err)
+			return fuse.EIO
 		}
 
 		return nil
 
 	})
 
+	if err == nil {
+		dir.wfs.cacheDelete(newPath)
+		dir.wfs.cacheDelete(oldPath)
+
+		// fmt.Printf("rename path: %v => %v\n", oldPath, newPath)
+		dir.wfs.fsNodeCache.Move(oldPath, newPath)
+
+	}
+
+	return err
 }

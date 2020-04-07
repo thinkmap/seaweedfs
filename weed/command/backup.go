@@ -5,8 +5,8 @@ import (
 
 	"github.com/chrislusf/seaweedfs/weed/security"
 	"github.com/chrislusf/seaweedfs/weed/storage/needle"
+	"github.com/chrislusf/seaweedfs/weed/storage/super_block"
 	"github.com/chrislusf/seaweedfs/weed/util"
-	"github.com/spf13/viper"
 
 	"github.com/chrislusf/seaweedfs/weed/operation"
 	"github.com/chrislusf/seaweedfs/weed/storage"
@@ -64,7 +64,7 @@ var cmdBackup = &Command{
 func runBackup(cmd *Command, args []string) bool {
 
 	util.LoadConfiguration("security", false)
-	grpcDialOption := security.LoadClientTLS(viper.Sub("grpc"), "client")
+	grpcDialOption := security.LoadClientTLS(util.GetViper(), "grpc.client")
 
 	if *s.volumeId == -1 {
 		return false
@@ -98,28 +98,28 @@ func runBackup(cmd *Command, args []string) bool {
 			return true
 		}
 	}
-	var replication *storage.ReplicaPlacement
+	var replication *super_block.ReplicaPlacement
 	if *s.replication != "" {
-		replication, err = storage.NewReplicaPlacementFromString(*s.replication)
+		replication, err = super_block.NewReplicaPlacementFromString(*s.replication)
 		if err != nil {
 			fmt.Printf("Error generate volume %d replication %s : %v\n", vid, *s.replication, err)
 			return true
 		}
 	} else {
-		replication, err = storage.NewReplicaPlacementFromString(stats.Replication)
+		replication, err = super_block.NewReplicaPlacementFromString(stats.Replication)
 		if err != nil {
 			fmt.Printf("Error get volume %d replication %s : %v\n", vid, stats.Replication, err)
 			return true
 		}
 	}
-	v, err := storage.NewVolume(*s.dir, *s.collection, vid, storage.NeedleMapInMemory, replication, ttl, 0)
+	v, err := storage.NewVolume(*s.dir, *s.collection, vid, storage.NeedleMapInMemory, replication, ttl, 0, 0)
 	if err != nil {
 		fmt.Printf("Error creating or reading from volume %d: %v\n", vid, err)
 		return true
 	}
 
 	if v.SuperBlock.CompactionRevision < uint16(stats.CompactRevision) {
-		if err = v.Compact(0, 0); err != nil {
+		if err = v.Compact2(30*1024*1024*1024, 0); err != nil {
 			fmt.Printf("Compact Volume before synchronizing %v\n", err)
 			return true
 		}
@@ -128,7 +128,7 @@ func runBackup(cmd *Command, args []string) bool {
 			return true
 		}
 		v.SuperBlock.CompactionRevision = uint16(stats.CompactRevision)
-		v.DataFile().WriteAt(v.SuperBlock.Bytes(), 0)
+		v.DataBackend.WriteAt(v.SuperBlock.Bytes(), 0)
 	}
 
 	datSize, _, _ := v.FileStat()
@@ -137,7 +137,7 @@ func runBackup(cmd *Command, args []string) bool {
 		// remove the old data
 		v.Destroy()
 		// recreate an empty volume
-		v, err = storage.NewVolume(*s.dir, *s.collection, vid, storage.NeedleMapInMemory, replication, ttl, 0)
+		v, err = storage.NewVolume(*s.dir, *s.collection, vid, storage.NeedleMapInMemory, replication, ttl, 0, 0)
 		if err != nil {
 			fmt.Printf("Error creating or reading from volume %d: %v\n", vid, err)
 			return true

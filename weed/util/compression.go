@@ -7,8 +7,9 @@ import (
 	"io/ioutil"
 	"strings"
 
-	"github.com/chrislusf/seaweedfs/weed/glog"
 	"golang.org/x/tools/godoc/util"
+
+	"github.com/chrislusf/seaweedfs/weed/glog"
 )
 
 func GzipData(input []byte) ([]byte, error) {
@@ -37,7 +38,8 @@ func UnGzipData(input []byte) ([]byte, error) {
 
 /*
 * Default more not to gzip since gzip can be done on client side.
- */func IsGzippable(ext, mtype string, data []byte) bool {
+ */
+func IsGzippable(ext, mtype string, data []byte) bool {
 
 	shouldBeZipped, iAmSure := IsGzippableFileType(ext, mtype)
 	if iAmSure {
@@ -60,7 +62,7 @@ func UnGzipData(input []byte) ([]byte, error) {
 
 	// images
 	switch ext {
-	case ".svg", ".bmp":
+	case ".svg", ".bmp", ".wav":
 		return true, true
 	}
 	if strings.HasPrefix(mtype, "image/") {
@@ -85,6 +87,14 @@ func UnGzipData(input []byte) ([]byte, error) {
 			return true, true
 		}
 		if strings.HasSuffix(mtype, "script") {
+			return true, true
+		}
+
+	}
+
+	if strings.HasPrefix(mtype, "audio/") {
+		switch strings.TrimPrefix(mtype, "audio/") {
+		case "wave", "wav", "x-wav", "x-pn-wav":
 			return true, true
 		}
 	}
