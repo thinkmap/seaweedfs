@@ -14,8 +14,10 @@ import (
 	"net/textproto"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/chrislusf/seaweedfs/weed/glog"
+	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
 	"github.com/chrislusf/seaweedfs/weed/security"
 	"github.com/chrislusf/seaweedfs/weed/util"
 )
@@ -29,6 +31,18 @@ type UploadResult struct {
 	Mime      string `json:"mime,omitempty"`
 	Gzip      uint32 `json:"gzip,omitempty"`
 	Md5       string `json:"md5,omitempty"`
+}
+
+func (uploadResult *UploadResult) ToPbFileChunk(fileId string, offset int64) *filer_pb.FileChunk {
+	return &filer_pb.FileChunk{
+		FileId:    fileId,
+		Offset:    offset,
+		Size:      uint64(uploadResult.Size),
+		Mtime:     time.Now().UnixNano(),
+		ETag:      uploadResult.ETag,
+		CipherKey: uploadResult.CipherKey,
+		IsGzipped: uploadResult.Gzip > 0,
+	}
 }
 
 var (
@@ -45,11 +59,9 @@ var fileNameEscaper = strings.NewReplacer("\\", "\\\\", "\"", "\\\"")
 
 // Upload sends a POST request to a volume server to upload the content with adjustable compression level
 func UploadData(uploadUrl string, filename string, cipher bool, data []byte, isInputGzipped bool, mtype string, pairMap map[string]string, jwt security.EncodedJwt) (uploadResult *UploadResult, err error) {
-	hash := md5.New()
-	hash.Write(data)
 	uploadResult, err = doUploadData(uploadUrl, filename, cipher, data, isInputGzipped, mtype, pairMap, jwt)
 	if uploadResult != nil {
-		uploadResult.Md5 = fmt.Sprintf("%x", hash.Sum(nil))
+		uploadResult.Md5 = util.Md5(data)
 	}
 	return
 }
@@ -79,9 +91,15 @@ func doUploadData(uploadUrl string, filename string, cipher bool, data []byte, i
 	contentIsGzipped := isInputGzipped
 	shouldGzipNow := false
 	if !isInputGzipped {
+		if mtype == "" {
+			mtype = http.DetectContentType(data)
+			if mtype == "application/octet-stream" {
+				mtype = ""
+			}
+		}
 		if shouldBeZipped, iAmSure := util.IsGzippableFileType(filepath.Base(filename), mtype); iAmSure && shouldBeZipped {
 			shouldGzipNow = true
-		} else if len(data) > 128 {
+		} else if !iAmSure && mtype == "" && len(data) > 128 {
 			var compressed []byte
 			compressed, err = util.GzipData(data[0:128])
 			shouldGzipNow = len(compressed)*10 < 128*9 // can not compress to less than 90%

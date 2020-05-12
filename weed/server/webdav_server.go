@@ -10,14 +10,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chrislusf/seaweedfs/weed/util/grace"
 	"golang.org/x/net/webdav"
 	"google.golang.org/grpc"
 
 	"github.com/chrislusf/seaweedfs/weed/operation"
 	"github.com/chrislusf/seaweedfs/weed/pb"
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
-	"github.com/chrislusf/seaweedfs/weed/pb/pb_cache"
 	"github.com/chrislusf/seaweedfs/weed/util"
+	"github.com/chrislusf/seaweedfs/weed/util/chunk_cache"
 
 	"github.com/chrislusf/seaweedfs/weed/filer2"
 	"github.com/chrislusf/seaweedfs/weed/glog"
@@ -34,6 +35,8 @@ type WebDavOption struct {
 	Uid              uint32
 	Gid              uint32
 	Cipher           bool
+	CacheDir         string
+	CacheSizeMB      int64
 }
 
 type WebDavServer struct {
@@ -67,7 +70,7 @@ type WebDavFileSystem struct {
 	secret         security.SigningKey
 	filer          *filer2.Filer
 	grpcDialOption grpc.DialOption
-	chunkCache     *pb_cache.ChunkCache
+	chunkCache     *chunk_cache.ChunkCache
 }
 
 type FileInfo struct {
@@ -96,11 +99,18 @@ type WebDavFile struct {
 }
 
 func NewWebDavFileSystem(option *WebDavOption) (webdav.FileSystem, error) {
+
+	chunkCache := chunk_cache.NewChunkCache(256, option.CacheDir, option.CacheSizeMB)
+	grace.OnInterrupt(func() {
+		chunkCache.Shutdown()
+	})
 	return &WebDavFileSystem{
 		option:     option,
-		chunkCache: pb_cache.NewChunkCache(1000),
+		chunkCache: chunkCache,
 	}, nil
 }
+
+var _ = filer_pb.FilerClient(&WebDavFileSystem{})
 
 func (fs *WebDavFileSystem) WithFilerClient(fn func(filer_pb.SeaweedFilerClient) error) error {
 
@@ -408,17 +418,7 @@ func (f *WebDavFile) Write(buf []byte) (int, error) {
 		return 0, fmt.Errorf("upload result: %v", uploadResult.Error)
 	}
 
-	chunk := &filer_pb.FileChunk{
-		FileId:    fileId,
-		Offset:    f.off,
-		Size:      uint64(len(buf)),
-		Mtime:     time.Now().UnixNano(),
-		ETag:      uploadResult.ETag,
-		CipherKey: uploadResult.CipherKey,
-		IsGzipped: uploadResult.Gzip > 0,
-	}
-
-	f.entry.Chunks = append(f.entry.Chunks, chunk)
+	f.entry.Chunks = append(f.entry.Chunks, uploadResult.ToPbFileChunk(fileId, f.off))
 
 	err = f.fs.WithFilerClient(func(client filer_pb.SeaweedFilerClient) error {
 		f.entry.Attributes.Mtime = time.Now().Unix()
@@ -501,7 +501,7 @@ func (f *WebDavFile) Readdir(count int) (ret []os.FileInfo, err error) {
 
 	dir, _ := util.FullPath(f.name).DirAndName()
 
-	err = filer_pb.ReadDirAllEntries(f.fs, util.FullPath(dir), "", func(entry *filer_pb.Entry, isLast bool) {
+	err = filer_pb.ReadDirAllEntries(f.fs, util.FullPath(dir), "", func(entry *filer_pb.Entry, isLast bool) error {
 		fi := FileInfo{
 			size:          int64(filer2.TotalSize(entry.GetChunks())),
 			name:          entry.Name,
@@ -515,6 +515,7 @@ func (f *WebDavFile) Readdir(count int) (ret []os.FileInfo, err error) {
 		}
 		glog.V(4).Infof("entry: %v", fi.name)
 		ret = append(ret, &fi)
+		return nil
 	})
 
 	old := f.off

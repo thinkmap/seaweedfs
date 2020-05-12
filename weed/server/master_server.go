@@ -32,6 +32,7 @@ const (
 )
 
 type MasterOption struct {
+	Host                    string
 	Port                    int
 	MetaFolder              string
 	VolumeSizeLimitMB       uint
@@ -64,6 +65,9 @@ type MasterServer struct {
 	grpcDialOption grpc.DialOption
 
 	MasterClient *wdclient.MasterClient
+
+	adminAccessSecret   int64
+	adminAccessLockTime time.Time
 }
 
 func NewMasterServer(r *mux.Router, option *MasterOption, peers []string) *MasterServer {
@@ -91,7 +95,7 @@ func NewMasterServer(r *mux.Router, option *MasterOption, peers []string) *Maste
 		preallocateSize: preallocateSize,
 		clientChans:     make(map[string]chan *master_pb.VolumeLocation),
 		grpcDialOption:  grpcDialOption,
-		MasterClient:    wdclient.NewMasterClient(grpcDialOption, "master", 0, peers),
+		MasterClient:    wdclient.NewMasterClient(grpcDialOption, "master", option.Host, 0, peers),
 	}
 	ms.bounedLeaderChan = make(chan int, 16)
 
@@ -197,10 +201,14 @@ func (ms *MasterServer) startAdminScripts() {
 	v.SetDefault("master.maintenance.sleep_minutes", 17)
 	sleepMinutes := v.GetInt("master.maintenance.sleep_minutes")
 
-	v.SetDefault("master.filer.default_filer_url", "http://localhost:8888/")
-	filerURL := v.GetString("master.filer.default_filer_url")
+	v.SetDefault("master.filer.default", "localhost:8888")
+	filerHostPort := v.GetString("master.filer.default")
 
 	scriptLines := strings.Split(adminScripts, "\n")
+	if !strings.Contains(adminScripts, "lock") {
+		scriptLines = append(append([]string{}, "lock"), scriptLines...)
+		scriptLines = append(scriptLines, "unlock")
+	}
 
 	masterAddress := "localhost:" + strconv.Itoa(ms.option.Port)
 
@@ -208,9 +216,10 @@ func (ms *MasterServer) startAdminScripts() {
 	shellOptions.GrpcDialOption = security.LoadClientTLS(v, "grpc.master")
 	shellOptions.Masters = &masterAddress
 
-	shellOptions.FilerHost, shellOptions.FilerPort, shellOptions.Directory, err = util.ParseFilerUrl(filerURL)
+	shellOptions.FilerHost, shellOptions.FilerPort, err = util.ParseHostPort(filerHostPort)
+	shellOptions.Directory = "/"
 	if err != nil {
-		glog.V(0).Infof("failed to parse master.filer.default_filer_urll=%s : %v\n", filerURL, err)
+		glog.V(0).Infof("failed to parse master.filer.default = %s : %v\n", filerHostPort, err)
 		return
 	}
 
@@ -227,29 +236,34 @@ func (ms *MasterServer) startAdminScripts() {
 		for range c {
 			if ms.Topo.IsLeader() {
 				for _, line := range scriptLines {
-
-					cmds := reg.FindAllString(line, -1)
-					if len(cmds) == 0 {
-						continue
-					}
-					args := make([]string, len(cmds[1:]))
-					for i := range args {
-						args[i] = strings.Trim(string(cmds[1+i]), "\"'")
-					}
-					cmd := strings.ToLower(cmds[0])
-
-					for _, c := range shell.Commands {
-						if c.Name() == cmd {
-							glog.V(0).Infof("executing: %s %v", cmd, args)
-							if err := c.Do(args, commandEnv, os.Stdout); err != nil {
-								glog.V(0).Infof("error: %v", err)
-							}
-						}
+					for _, c := range strings.Split(line, ";") {
+						processEachCmd(reg, c, commandEnv)
 					}
 				}
 			}
 		}
 	}()
+}
+
+func processEachCmd(reg *regexp.Regexp, line string, commandEnv *shell.CommandEnv) {
+	cmds := reg.FindAllString(line, -1)
+	if len(cmds) == 0 {
+		return
+	}
+	args := make([]string, len(cmds[1:]))
+	for i := range args {
+		args[i] = strings.Trim(string(cmds[1+i]), "\"'")
+	}
+	cmd := strings.ToLower(cmds[0])
+
+	for _, c := range shell.Commands {
+		if c.Name() == cmd {
+			glog.V(0).Infof("executing: %s %v", cmd, args)
+			if err := c.Do(args, commandEnv, os.Stdout); err != nil {
+				glog.V(0).Infof("error: %v", err)
+			}
+		}
+	}
 }
 
 func (ms *MasterServer) createSequencer(option *MasterOption) sequence.Sequencer {

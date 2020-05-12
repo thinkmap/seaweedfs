@@ -90,7 +90,7 @@ There is only 40 bytes of disk storage overhead for each file's metadata. It is 
 
 SeaweedFS started by implementing [Facebook's Haystack design paper](http://www.usenix.org/event/osdi10/tech/full_papers/Beaver.pdf). Also, SeaweedFS implements erasure coding with ideas from [f4: Facebook’s Warm BLOB Storage System](https://www.usenix.org/system/files/conference/osdi14/osdi14-paper-muralidhar.pdf)
 
-On top of the object store, optional [Filer] can support directories and POSIX attributes. Filer is a separate linearly-scalable stateless server with customizable metadata stores, e.g., MySql, Postgres, Redis, Etcd, Cassandra, LevelDB, MemSql, TiDB, TiKV, CockroachDB, etc.
+On top of the object store, optional [Filer] can support directories and POSIX attributes. Filer is a separate linearly-scalable stateless server with customizable metadata stores, e.g., MySql, Postgres, Mongodb, Redis, Etcd, Cassandra, LevelDB, MemSql, TiDB, TiKV, CockroachDB, etc.
 
 [Back to TOC](#table-of-contents)
 
@@ -100,9 +100,9 @@ On top of the object store, optional [Filer] can support directories and POSIX a
 * Automatic Gzip compression depending on file mime type.
 * Automatic compaction to reclaim disk space after deletion or update.
 * [Automatic entry TTL expiration][VolumeServerTTL].
-* Servers in the same cluster can have different disk spaces, file systems, OS etc.
+* Any server with some disk spaces can add to the total storage space.
 * Adding/Removing servers does **not** cause any data re-balancing.
-* Optionally fix the orientation for jpeg pictures.
+* Optional picture resizing.
 * Support ETag, Accept-Range, Last-Modified, etc.
 * Support in-memory/leveldb/readonly mode tuning for memory/performance balance.
 * Support rebalancing the writable and readonly volumes.
@@ -361,7 +361,7 @@ The architectures are mostly the same. SeaweedFS aims to store and read files fa
 
 * SeaweedFS optimizes for small files, ensuring O(1) disk seek operation, and can also handle large files.
 * SeaweedFS statically assigns a volume id for a file. Locating file content becomes just a lookup of the volume id, which can be easily cached.
-* SeaweedFS Filer metadata store can be any well-known and proven data stores, e.g., Cassandra, Redis, Etcd, MySql, Postgres, MemSql, TiDB, CockroachDB, etc, and is easy to customized.
+* SeaweedFS Filer metadata store can be any well-known and proven data stores, e.g., Cassandra, Mongodb, Redis, Etcd, MySql, Postgres, MemSql, TiDB, CockroachDB, etc, and is easy to customized.
 * SeaweedFS Volume server also communicates directly with clients via HTTP, supporting range queries, direct uploads, etc.
 
 | System         | File Meta                       | File Content Read| POSIX  | REST API | Optimized for small files |
@@ -402,7 +402,7 @@ Ceph uses CRUSH hashing to automatically manage the data placement. SeaweedFS pl
 
 SeaweedFS is optimized for small files. Small files are stored as one continuous block of content, with at most 8 unused bytes between files. Small file access is O(1) disk read.
 
-SeaweedFS Filer uses off-the-shelf stores, such as MySql, Postgres, Redis, Etcd, Cassandra, MemSql, TiDB, CockroachCB, to manage file directories. These stores are proven, scalable, and easier to manage.
+SeaweedFS Filer uses off-the-shelf stores, such as MySql, Postgres, Mongodb, Redis, Etcd, Cassandra, MemSql, TiDB, CockroachCB, to manage file directories. These stores are proven, scalable, and easier to manage.
 
 | SeaweedFS         | comparable to Ceph | advantage |
 | -------------  | ------------- | ---------------- |
@@ -449,6 +449,12 @@ go get github.com/chrislusf/seaweedfs/weed
 ```
 
 Once this is done, you will find the executable "weed" in your `$GOPATH/bin` directory
+
+Note:
+* If you got into this problem, try to `rm -Rf $GOPATH/src/go.etcd.io/etcd/vendor/golang.org/x/net/trace` and build again.
+```
+panic: /debug/requests is already registered. You may have two independent copies of golang.org/x/net/trace in your binary, trying to maintain separate state. This may involve a vendored copy of golang.org/x/net/trace.
+```
 
 Step 4: after you modify your code locally, you could start a local build by calling `go install` under
 

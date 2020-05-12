@@ -19,13 +19,14 @@ import (
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
 	"github.com/chrislusf/seaweedfs/weed/security"
 	"github.com/chrislusf/seaweedfs/weed/util"
+	"github.com/chrislusf/seaweedfs/weed/util/grace"
 	"github.com/seaweedfs/fuse"
 	"github.com/seaweedfs/fuse/fs"
 )
 
 func runMount(cmd *Command, args []string) bool {
 
-	util.SetupProfiling(*mountCpuProfile, *mountMemProfile)
+	grace.SetupProfiling(*mountCpuProfile, *mountMemProfile)
 
 	umask, umaskErr := strconv.ParseUint(*mountOptions.umaskString, 8, 64)
 	if umaskErr != nil {
@@ -129,7 +130,6 @@ func RunMount(option *MountOptions, umask os.FileMode) bool {
 	}
 
 	options = append(options, osSpecificMountOptions()...)
-
 	if *option.allowOthers {
 		options = append(options, fuse.AllowOther())
 	}
@@ -137,15 +137,15 @@ func RunMount(option *MountOptions, umask os.FileMode) bool {
 		options = append(options, fuse.AllowNonEmptyMount())
 	}
 
+	// mount
 	c, err := fuse.Mount(dir, options...)
 	if err != nil {
 		glog.V(0).Infof("mount: %v", err)
 		return true
 	}
-
 	defer fuse.Unmount(dir)
 
-	util.OnInterrupt(func() {
+	grace.OnInterrupt(func() {
 		fuse.Unmount(dir)
 		c.Close()
 	})
@@ -164,7 +164,8 @@ func RunMount(option *MountOptions, umask os.FileMode) bool {
 		Replication:                 *option.replication,
 		TtlSec:                      int32(*option.ttlSec),
 		ChunkSizeLimit:              int64(chunkSizeLimitMB) * 1024 * 1024,
-		ChunkCacheCountLimit:        *option.chunkCacheCountLimit,
+		CacheDir:                    *option.cacheDir,
+		CacheSizeMB:                 *option.cacheSizeMB,
 		DataCenter:                  *option.dataCenter,
 		DirListCacheLimit:           *option.dirListCacheLimit,
 		EntryCacheTtl:               3 * time.Second,
@@ -175,6 +176,7 @@ func RunMount(option *MountOptions, umask os.FileMode) bool {
 		MountMtime:                  time.Now(),
 		Umask:                       umask,
 		OutsideContainerClusterMode: *mountOptions.outsideContainerClusterMode,
+		AsyncMetaDataCaching:        *mountOptions.asyncMetaDataCaching,
 		Cipher:                      cipher,
 	}))
 

@@ -17,9 +17,9 @@ import (
 
 // handling single chunk POST or PUT upload
 func (fs *FilerServer) encrypt(ctx context.Context, w http.ResponseWriter, r *http.Request,
-	replication string, collection string, dataCenter string, ttlSeconds int32, ttlString string) (filerResult *FilerPostResult, err error) {
+	replication string, collection string, dataCenter string, ttlSeconds int32, ttlString string, fsync bool) (filerResult *FilerPostResult, err error) {
 
-	fileId, urlLocation, auth, err := fs.assignNewFileInfo(w, r, replication, collection, dataCenter, ttlString)
+	fileId, urlLocation, auth, err := fs.assignNewFileInfo(w, r, replication, collection, dataCenter, ttlString, fsync)
 
 	if err != nil || fileId == "" || urlLocation == "" {
 		return nil, fmt.Errorf("fail to allocate volume for %s, collection:%s, datacenter:%s", r.URL.Path, collection, dataCenter)
@@ -46,19 +46,9 @@ func (fs *FilerServer) encrypt(ctx context.Context, w http.ResponseWriter, r *ht
 	}
 
 	// Save to chunk manifest structure
-	fileChunks := []*filer_pb.FileChunk{
-		{
-			FileId:    fileId,
-			Offset:    0,
-			Size:      uint64(uploadResult.Size),
-			Mtime:     time.Now().UnixNano(),
-			ETag:      uploadResult.Md5,
-			CipherKey: uploadResult.CipherKey,
-			IsGzipped: uploadResult.Gzip > 0,
-		},
-	}
+	fileChunks := []*filer_pb.FileChunk{uploadResult.ToPbFileChunk(fileId, 0)}
 
-	fmt.Printf("uploaded: %+v\n", uploadResult)
+	// fmt.Printf("uploaded: %+v\n", uploadResult)
 
 	path := r.URL.Path
 	if strings.HasSuffix(path, "/") {

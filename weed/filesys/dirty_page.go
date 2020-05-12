@@ -125,16 +125,18 @@ func (pages *ContinuousDirtyPages) saveExistingLargestPageToStorage() (chunk *fi
 		return nil, false, nil
 	}
 
-	chunk, err = pages.saveToStorage(maxList.ToReader(), maxList.Offset(), maxList.Size())
-	if err == nil {
-		hasSavedData = true
-		glog.V(3).Infof("%s saveToStorage [%d,%d) %s", pages.f.fullpath(), maxList.Offset(), maxList.Offset()+maxList.Size(), chunk.FileId)
-	} else {
-		glog.V(0).Infof("%s saveToStorage [%d,%d): %v", pages.f.fullpath(), maxList.Offset(), maxList.Offset()+maxList.Size(), err)
-		return
+	for {
+		chunk, err = pages.saveToStorage(maxList.ToReader(), maxList.Offset(), maxList.Size())
+		if err == nil {
+			hasSavedData = true
+			glog.V(3).Infof("%s saveToStorage [%d,%d) %s", pages.f.fullpath(), maxList.Offset(), maxList.Offset()+maxList.Size(), chunk.FileId)
+			return
+		} else {
+			glog.V(0).Infof("%s saveToStorage [%d,%d): %v", pages.f.fullpath(), maxList.Offset(), maxList.Offset()+maxList.Size(), err)
+			time.Sleep(5 * time.Second)
+		}
 	}
 
-	return
 }
 
 func (pages *ContinuousDirtyPages) saveToStorage(reader io.Reader, offset int64, size int64) (*filer_pb.FileChunk, error) {
@@ -185,15 +187,7 @@ func (pages *ContinuousDirtyPages) saveToStorage(reader io.Reader, offset int64,
 	}
 	pages.f.wfs.chunkCache.SetChunk(fileId, data)
 
-	return &filer_pb.FileChunk{
-		FileId:    fileId,
-		Offset:    offset,
-		Size:      uint64(size),
-		Mtime:     time.Now().UnixNano(),
-		ETag:      uploadResult.ETag,
-		CipherKey: uploadResult.CipherKey,
-		IsGzipped: uploadResult.Gzip > 0,
-	}, nil
+	return uploadResult.ToPbFileChunk(fileId, offset), nil
 
 }
 

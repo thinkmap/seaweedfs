@@ -1,6 +1,7 @@
 package weed_server
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"mime"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/chrislusf/seaweedfs/weed/filer2"
 	"github.com/chrislusf/seaweedfs/weed/glog"
@@ -78,8 +80,26 @@ func (fs *FilerServer) GetOrHeadHandler(w http.ResponseWriter, r *http.Request, 
 		w.Header().Set("Content-Type", mimeType)
 	}
 
+	// if modified since
+	if !entry.Attr.Mtime.IsZero() {
+		w.Header().Set("Last-Modified", entry.Attr.Mtime.UTC().Format(http.TimeFormat))
+		if r.Header.Get("If-Modified-Since") != "" {
+			if t, parseError := time.Parse(http.TimeFormat, r.Header.Get("If-Modified-Since")); parseError == nil {
+				if t.After(entry.Attr.Mtime) {
+					w.WriteHeader(http.StatusNotModified)
+					return
+				}
+			}
+		}
+	}
+
 	// set etag
-	setEtag(w, filer2.ETag(entry.Chunks))
+	etag := filer2.ETagEntry(entry)
+	if inm := r.Header.Get("If-None-Match"); inm == "\""+etag+"\"" {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	setEtag(w, etag)
 
 	if r.Method == "HEAD" {
 		w.Header().Set("Content-Length", strconv.FormatInt(int64(filer2.TotalSize(entry.Chunks)), 10))
@@ -95,8 +115,13 @@ func (fs *FilerServer) GetOrHeadHandler(w http.ResponseWriter, r *http.Request, 
 		ext := filepath.Ext(filename)
 		width, height, mode, shouldResize := shouldResizeImages(ext, r)
 		if shouldResize {
-			chunkedFileReader := filer2.NewChunkStreamReaderFromFiler(fs.filer.MasterClient, entry.Chunks)
-			rs, _, _ := images.Resized(ext, chunkedFileReader, width, height, mode)
+			data, err := filer2.ReadAll(fs.filer.MasterClient, entry.Chunks)
+			if err != nil {
+				glog.Errorf("failed to read %s: %v", path, err)
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+			rs, _, _ := images.Resized(ext, bytes.NewReader(data), width, height, mode)
 			io.Copy(w, rs)
 			return
 		}

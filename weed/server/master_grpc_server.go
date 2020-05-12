@@ -24,8 +24,10 @@ func (ms *MasterServer) SendHeartbeat(stream master_pb.Seaweed_SendHeartbeatServ
 	defer func() {
 		if dn != nil {
 
-			glog.V(0).Infof("unregister disconnected volume server %s:%d", dn.Ip, dn.Port)
+			// if the volume server disconnects and reconnects quickly
+			//  the unregister and register can race with each other
 			t.UnRegisterDataNode(dn)
+			glog.V(0).Infof("unregister disconnected volume server %s:%d", dn.Ip, dn.Port)
 
 			message := &master_pb.VolumeLocation{
 				Url:       dn.Url(),
@@ -230,7 +232,6 @@ func (ms *MasterServer) KeepConnected(stream master_pb.Seaweed_KeepConnectedServ
 		}
 	}
 
-	return nil
 }
 
 func (ms *MasterServer) informNewLeader(stream master_pb.Seaweed_KeepConnectedServer) error {

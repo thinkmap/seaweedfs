@@ -28,6 +28,7 @@ type CommandEnv struct {
 	env          map[string]string
 	MasterClient *wdclient.MasterClient
 	option       ShellOptions
+	locker       *ExclusiveLocker
 }
 
 type command interface {
@@ -41,11 +42,13 @@ var (
 )
 
 func NewCommandEnv(options ShellOptions) *CommandEnv {
-	return &CommandEnv{
+	ce := &CommandEnv{
 		env:          make(map[string]string),
-		MasterClient: wdclient.NewMasterClient(options.GrpcDialOption, "shell", 0, strings.Split(*options.Masters, ",")),
+		MasterClient: wdclient.NewMasterClient(options.GrpcDialOption, pb.AdminShellClient, "", 0, strings.Split(*options.Masters, ",")),
 		option:       options,
 	}
+	ce.locker = NewExclusiveLocker(ce.MasterClient)
+	return ce
 }
 
 func (ce *CommandEnv) parseUrl(input string) (path string, err error) {
@@ -65,6 +68,16 @@ func (ce *CommandEnv) isDirectory(path string) bool {
 
 }
 
+func (ce *CommandEnv) confirmIsLocked() error {
+
+	if ce.locker.isLocking {
+		return nil
+	}
+
+	return fmt.Errorf("need to lock to continue")
+
+}
+
 func (ce *CommandEnv) checkDirectory(path string) error {
 
 	dir, name := util.FullPath(path).DirAndName()
@@ -78,6 +91,8 @@ func (ce *CommandEnv) checkDirectory(path string) error {
 	return err
 
 }
+
+var _ = filer_pb.FilerClient(&CommandEnv{})
 
 func (ce *CommandEnv) WithFilerClient(fn func(filer_pb.SeaweedFilerClient) error) error {
 

@@ -69,11 +69,12 @@ func (s3a *S3ApiServer) completeMultipartUpload(input *s3.CompleteMultipartUploa
 		if strings.HasSuffix(entry.Name, ".part") && !entry.IsDirectory {
 			for _, chunk := range entry.Chunks {
 				p := &filer_pb.FileChunk{
-					FileId: chunk.GetFileIdString(),
-					Offset: offset,
-					Size:   chunk.Size,
-					Mtime:  chunk.Mtime,
-					ETag:   chunk.ETag,
+					FileId:    chunk.GetFileIdString(),
+					Offset:    offset,
+					Size:      chunk.Size,
+					Mtime:     chunk.Mtime,
+					CipherKey: chunk.CipherKey,
+					ETag:      chunk.ETag,
 				}
 				finalParts = append(finalParts, p)
 				offset += int64(chunk.Size)
@@ -107,7 +108,7 @@ func (s3a *S3ApiServer) completeMultipartUpload(input *s3.CompleteMultipartUploa
 		CompleteMultipartUploadOutput: s3.CompleteMultipartUploadOutput{
 			Location: aws.String(fmt.Sprintf("http://%s%s/%s", s3a.option.Filer, dirName, entryName)),
 			Bucket:   input.Bucket,
-			ETag:     aws.String("\"" + filer2.ETag(finalParts) + "\""),
+			ETag:     aws.String("\"" + filer2.ETagChunks(finalParts) + "\""),
 			Key:      objectKey(input.Key),
 		},
 	}
@@ -206,9 +207,9 @@ func (s3a *S3ApiServer) listObjectParts(input *s3.ListPartsInput) (output *ListP
 			}
 			output.Parts = append(output.Parts, &s3.Part{
 				PartNumber:   aws.Int64(int64(partNumber)),
-				LastModified: aws.Time(time.Unix(entry.Attributes.Mtime, 0)),
+				LastModified: aws.Time(time.Unix(entry.Attributes.Mtime, 0).UTC()),
 				Size:         aws.Int64(int64(filer2.TotalSize(entry.Chunks))),
-				ETag:         aws.String("\"" + filer2.ETag(entry.Chunks) + "\""),
+				ETag:         aws.String("\"" + filer2.ETag(entry) + "\""),
 			})
 		}
 	}

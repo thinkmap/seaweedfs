@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/chrislusf/seaweedfs/weed/pb"
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
@@ -26,6 +27,7 @@ var cmdWatch = &Command{
 var (
 	watchFiler  = cmdWatch.Flag.String("filer", "localhost:8888", "filer hostname:port")
 	watchTarget = cmdWatch.Flag.String("pathPrefix", "/", "path to a folder or file, or common prefix for the folders or files on filer")
+	watchStart  = cmdWatch.Flag.Duration("timeAgo", 0, "start time before now. \"300ms\", \"1.5h\" or \"2h45m\". Valid time units are \"ns\", \"us\" (or \"µs\"), \"ms\", \"s\", \"m\", \"h\"")
 )
 
 func runWatch(cmd *Command, args []string) bool {
@@ -34,10 +36,10 @@ func runWatch(cmd *Command, args []string) bool {
 
 	watchErr := pb.WithFilerClient(*watchFiler, grpcDialOption, func(client filer_pb.SeaweedFilerClient) error {
 
-		stream, err := client.ListenForEvents(context.Background(), &filer_pb.ListenForEventsRequest{
+		stream, err := client.SubscribeMetadata(context.Background(), &filer_pb.SubscribeMetadataRequest{
 			ClientName: "watch",
 			PathPrefix: *watchTarget,
-			SinceNs:    0,
+			SinceNs:    time.Now().Add(-*watchStart).UnixNano(),
 		})
 		if err != nil {
 			return fmt.Errorf("listen: %v", err)

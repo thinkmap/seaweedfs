@@ -80,10 +80,10 @@ func (v *Volume) Compact2(preallocate int64, compactionBytePerSecond int64) erro
 	v.lastCompactRevision = v.SuperBlock.CompactionRevision
 	glog.V(3).Infof("creating copies for volume %d ...", v.Id)
 	if err := v.DataBackend.Sync(); err != nil {
-		glog.V(0).Infof("compact2 fail to sync volume dat %d", v.Id)
+		glog.V(0).Infof("compact2 fail to sync volume dat %d: %v", v.Id, err)
 	}
 	if err := v.nm.Sync(); err != nil {
-		glog.V(0).Infof("compact2 fail to sync volume idx %d", v.Id)
+		glog.V(0).Infof("compact2 fail to sync volume idx %d: %v", v.Id, err)
 	}
 	return copyDataBasedOnIndexFile(filePath+".dat", filePath+".idx", filePath+".cpd", filePath+".cpx", v.SuperBlock, v.Version(), preallocate, compactionBytePerSecond)
 }
@@ -354,7 +354,7 @@ func (v *Volume) copyDataAndGenerateIndexFile(dstName, idxName string, prealloca
 	var (
 		dst backend.BackendStorageFile
 	)
-	if dst, err = createVolumeFile(dstName, preallocate, 0); err != nil {
+	if dst, err = backend.CreateVolumeFile(dstName, preallocate, 0); err != nil {
 		return
 	}
 	defer dst.Close()
@@ -383,7 +383,7 @@ func copyDataBasedOnIndexFile(srcDatName, srcIdxName, dstDatName, datIdxName str
 		srcDatBackend, dstDatBackend backend.BackendStorageFile
 		dataFile                     *os.File
 	)
-	if dstDatBackend, err = createVolumeFile(dstDatName, preallocate, 0); err != nil {
+	if dstDatBackend, err = backend.CreateVolumeFile(dstDatName, preallocate, 0); err != nil {
 		return
 	}
 	defer dstDatBackend.Close()

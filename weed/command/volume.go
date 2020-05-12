@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chrislusf/seaweedfs/weed/util/grace"
 	"github.com/spf13/viper"
 	"google.golang.org/grpc"
 
@@ -57,7 +58,7 @@ func init() {
 	cmdVolume.Run = runVolume // break init cycle
 	v.port = cmdVolume.Flag.Int("port", 8080, "http listen port")
 	v.publicPort = cmdVolume.Flag.Int("port.public", 0, "port opened to public")
-	v.ip = cmdVolume.Flag.String("ip", "", "ip or server name")
+	v.ip = cmdVolume.Flag.String("ip", util.DetectedHostAddress(), "ip or server name")
 	v.publicUrl = cmdVolume.Flag.String("publicUrl", "", "Publicly accessible address")
 	v.bindIp = cmdVolume.Flag.String("ip.bind", "0.0.0.0", "ip address to bind to")
 	v.masters = cmdVolume.Flag.String("mserver", "localhost:9333", "comma-separated master servers")
@@ -93,7 +94,7 @@ func runVolume(cmd *Command, args []string) bool {
 	util.LoadConfiguration("security", false)
 
 	runtime.GOMAXPROCS(runtime.NumCPU())
-	util.SetupProfiling(*v.cpuProfile, *v.memProfile)
+	grace.SetupProfiling(*v.cpuProfile, *v.memProfile)
 
 	v.startVolumeServer(*volumeFolders, *maxVolumeCounts, *volumeWhiteListOption)
 
@@ -127,7 +128,8 @@ func (v VolumeServerOptions) startVolumeServer(volumeFolders, maxVolumeCounts, v
 	}
 
 	if *v.ip == "" {
-		*v.ip = "127.0.0.1"
+		*v.ip = util.DetectedHostAddress()
+		glog.V(0).Infof("detected volume server ip address: %v", *v.ip)
 	}
 
 	if *v.publicPort == 0 {
@@ -182,7 +184,7 @@ func (v VolumeServerOptions) startVolumeServer(volumeFolders, maxVolumeCounts, v
 	clusterHttpServer := v.startClusterHttpService(volumeMux)
 
 	stopChain := make(chan struct{})
-	util.OnInterrupt(func() {
+	grace.OnInterrupt(func() {
 		fmt.Println("volume server has be killed")
 		var startTime time.Time
 

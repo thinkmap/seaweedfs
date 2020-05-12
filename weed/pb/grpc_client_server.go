@@ -14,6 +14,7 @@ import (
 
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
 	"github.com/chrislusf/seaweedfs/weed/pb/master_pb"
+	"github.com/chrislusf/seaweedfs/weed/pb/messaging_pb"
 )
 
 const (
@@ -39,7 +40,7 @@ func NewGrpcServer(opts ...grpc.ServerOption) *grpc.Server {
 		}),
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
 			MinTime:             60 * time.Second, // min time a client should wait before sending a ping
-			PermitWithoutStream: true,
+			PermitWithoutStream: false,
 		}),
 		grpc.MaxRecvMsgSize(Max_Message_Size),
 		grpc.MaxSendMsgSize(Max_Message_Size),
@@ -65,7 +66,7 @@ func GrpcDial(ctx context.Context, address string, opts ...grpc.DialOption) (*gr
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                30 * time.Second, // client ping server if no activity for this long
 			Timeout:             20 * time.Second,
-			PermitWithoutStream: true,
+			PermitWithoutStream: false,
 		}))
 	for _, opt := range opts {
 		if opt != nil {
@@ -85,9 +86,10 @@ func WithCachedGrpcClient(fn func(*grpc.ClientConn) error, address string, opts 
 		err := fn(existingConnection)
 		if err != nil {
 			grpcClientsLock.Lock()
-			delete(grpcClients, address)
+			// delete(grpcClients, address)
 			grpcClientsLock.Unlock()
-			existingConnection.Close()
+			// println("closing existing connection to", existingConnection.Target())
+			// existingConnection.Close()
 		}
 		return err
 	}
@@ -104,9 +106,10 @@ func WithCachedGrpcClient(fn func(*grpc.ClientConn) error, address string, opts 
 	err = fn(grpcConnection)
 	if err != nil {
 		grpcClientsLock.Lock()
-		delete(grpcClients, address)
+		// delete(grpcClients, address)
 		grpcClientsLock.Unlock()
-		grpcConnection.Close()
+		// println("closing created new connection to", grpcConnection.Target())
+		// grpcConnection.Close()
 	}
 
 	return err
@@ -155,6 +158,15 @@ func WithMasterClient(master string, grpcDialOption grpc.DialOption, fn func(cli
 		client := master_pb.NewSeaweedClient(grpcConnection)
 		return fn(client)
 	}, masterGrpcAddress, grpcDialOption)
+
+}
+
+func WithBrokerGrpcClient(brokerGrpcAddress string, grpcDialOption grpc.DialOption, fn func(client messaging_pb.SeaweedMessagingClient) error) error {
+
+	return WithCachedGrpcClient(func(grpcConnection *grpc.ClientConn) error {
+		client := messaging_pb.NewSeaweedMessagingClient(grpcConnection)
+		return fn(client)
+	}, brokerGrpcAddress, grpcDialOption)
 
 }
 

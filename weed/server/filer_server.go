@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chrislusf/seaweedfs/weed/util/grace"
 	"google.golang.org/grpc"
 
 	"github.com/chrislusf/seaweedfs/weed/operation"
@@ -21,9 +22,11 @@ import (
 	_ "github.com/chrislusf/seaweedfs/weed/filer2/etcd"
 	_ "github.com/chrislusf/seaweedfs/weed/filer2/leveldb"
 	_ "github.com/chrislusf/seaweedfs/weed/filer2/leveldb2"
+	_ "github.com/chrislusf/seaweedfs/weed/filer2/mongodb"
 	_ "github.com/chrislusf/seaweedfs/weed/filer2/mysql"
 	_ "github.com/chrislusf/seaweedfs/weed/filer2/postgres"
 	_ "github.com/chrislusf/seaweedfs/weed/filer2/redis"
+	_ "github.com/chrislusf/seaweedfs/weed/filer2/redis2"
 	"github.com/chrislusf/seaweedfs/weed/glog"
 	"github.com/chrislusf/seaweedfs/weed/notification"
 	_ "github.com/chrislusf/seaweedfs/weed/notification/aws_sqs"
@@ -44,6 +47,7 @@ type FilerOption struct {
 	DataCenter         string
 	DefaultLevelDbDir  string
 	DisableHttp        bool
+	Host               string
 	Port               uint32
 	recursiveDelete    bool
 	Cipher             bool
@@ -72,7 +76,7 @@ func NewFilerServer(defaultMux, readonlyMux *http.ServeMux, option *FilerOption)
 		glog.Fatal("master list is required!")
 	}
 
-	fs.filer = filer2.NewFiler(option.Masters, fs.grpcDialOption, option.Port+10000, fs.notifyMetaListeners)
+	fs.filer = filer2.NewFiler(option.Masters, fs.grpcDialOption, option.Host, option.Port, option.Collection, option.DefaultReplication, fs.notifyMetaListeners)
 	fs.filer.Cipher = option.Cipher
 
 	maybeStartMetrics(fs, option)
@@ -91,10 +95,9 @@ func NewFilerServer(defaultMux, readonlyMux *http.ServeMux, option *FilerOption)
 	util.LoadConfiguration("notification", false)
 
 	fs.option.recursiveDelete = v.GetBool("filer.options.recursive_delete")
-	v.Set("filer.option.buckets_folder", "/buckets")
-	v.Set("filer.option.queues_folder", "/queues")
-	fs.filer.DirBucketsPath = v.GetString("filer.option.buckets_folder")
-	fs.filer.DirQueuesPath = v.GetString("filer.option.queues_folder")
+	v.SetDefault("filer.options.buckets_folder", "/buckets")
+	fs.filer.DirBucketsPath = v.GetString("filer.options.buckets_folder")
+	fs.filer.FsyncBuckets = v.GetStringSlice("filer.options.buckets_fsync")
 	fs.filer.LoadConfiguration(v)
 
 	notification.LoadConfiguration(v, "notification.")
@@ -107,9 +110,9 @@ func NewFilerServer(defaultMux, readonlyMux *http.ServeMux, option *FilerOption)
 		readonlyMux.HandleFunc("/", fs.readonlyFilerHandler)
 	}
 
-	fs.filer.LoadBuckets(fs.filer.DirBucketsPath)
+	fs.filer.LoadBuckets()
 
-	util.OnInterrupt(func() {
+	grace.OnInterrupt(func() {
 		fs.filer.Shutdown()
 	})
 

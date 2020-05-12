@@ -221,8 +221,14 @@ func (s *Store) CollectHeartbeat() *master_pb.Heartbeat {
 			// delete expired volumes.
 			location.volumesLock.Lock()
 			for _, vid := range deleteVids {
-				location.deleteVolumeById(vid)
-				glog.V(0).Infoln("volume", vid, "is deleted.")
+				found, err := location.deleteVolumeById(vid)
+				if found {
+					if err == nil {
+						glog.V(0).Infof("volume %d is deleted", vid)
+					} else {
+						glog.V(0).Infof("delete volume %d: %v", vid, err)
+					}
+				}
 			}
 			location.volumesLock.Unlock()
 		}
@@ -252,18 +258,13 @@ func (s *Store) Close() {
 	}
 }
 
-func (s *Store) WriteVolumeNeedle(i needle.VolumeId, n *needle.Needle) (isUnchanged bool, err error) {
+func (s *Store) WriteVolumeNeedle(i needle.VolumeId, n *needle.Needle, fsync bool) (isUnchanged bool, err error) {
 	if v := s.findVolume(i); v != nil {
 		if v.IsReadOnly() {
 			err = fmt.Errorf("volume %d is read only", i)
 			return
 		}
-		// using len(n.Data) here instead of n.Size before n.Size is populated in v.writeNeedle(n)
-		if MaxPossibleVolumeSize >= v.ContentSize()+uint64(needle.GetActualSize(uint32(len(n.Data)), v.Version())) {
-			_, _, isUnchanged, err = v.writeNeedle(n)
-		} else {
-			err = fmt.Errorf("volume size limit %d exceeded! current size is %d", s.GetVolumeSizeLimit(), v.ContentSize())
-		}
+		_, _, isUnchanged, err = v.writeNeedle2(n, fsync)
 		return
 	}
 	glog.V(0).Infoln("volume", i, "not found!")
@@ -276,11 +277,7 @@ func (s *Store) DeleteVolumeNeedle(i needle.VolumeId, n *needle.Needle) (uint32,
 		if v.noWriteOrDelete {
 			return 0, fmt.Errorf("volume %d is read only", i)
 		}
-		if MaxPossibleVolumeSize >= v.ContentSize()+uint64(needle.GetActualSize(0, v.Version())) {
-			return v.deleteNeedle(n)
-		} else {
-			return 0, fmt.Errorf("volume size limit %d exceeded! current size is %d", s.GetVolumeSizeLimit(), v.ContentSize())
-		}
+		return v.deleteNeedle2(n)
 	}
 	return 0, fmt.Errorf("volume %d not found on %s:%d", i, s.Ip, s.Port)
 }
@@ -355,7 +352,7 @@ func (s *Store) UnmountVolume(i needle.VolumeId) error {
 func (s *Store) DeleteVolume(i needle.VolumeId) error {
 	v := s.findVolume(i)
 	if v == nil {
-		return nil
+		return fmt.Errorf("delete volume %d not found on disk", i)
 	}
 	message := master_pb.VolumeShortInformationMessage{
 		Id:               uint32(v.Id),
@@ -365,7 +362,7 @@ func (s *Store) DeleteVolume(i needle.VolumeId) error {
 		Ttl:              v.Ttl.ToUint32(),
 	}
 	for _, location := range s.Locations {
-		if error := location.deleteVolumeById(i); error == nil {
+		if found, error := location.deleteVolumeById(i); found && error == nil {
 			glog.V(0).Infof("DeleteVolume %d", i)
 			s.DeletedVolumesChan <- message
 			return nil
@@ -421,7 +418,7 @@ func (s *Store) MaybeAdjustVolumeMax() (hasChanges bool) {
 				maxVolumeCount += int(uint64(unclaimedSpaces)/volumeSizeLimit) - 1
 			}
 			diskLocation.MaxVolumeCount = maxVolumeCount
-			glog.V(0).Infof("disk %s max %d unclaimedSpace:%dMB, unused:%dMB volumeSizeLimit:%d/MB",
+			glog.V(0).Infof("disk %s max %d unclaimedSpace:%dMB, unused:%dMB volumeSizeLimit:%dMB",
 				diskLocation.Directory, maxVolumeCount, unclaimedSpaces/1024/1024, unusedSpace/1024/1024, volumeSizeLimit/1024/1024)
 			hasChanges = true
 		}

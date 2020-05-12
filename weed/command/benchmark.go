@@ -42,6 +42,7 @@ type BenchmarkOptions struct {
 	grpcDialOption   grpc.DialOption
 	masterClient     *wdclient.MasterClient
 	grpcRead         *bool
+	fsync            *bool
 }
 
 var (
@@ -67,6 +68,7 @@ func init() {
 	b.cpuprofile = cmdBenchmark.Flag.String("cpuprofile", "", "cpu profile output file")
 	b.maxCpu = cmdBenchmark.Flag.Int("maxCpu", 0, "maximum number of CPUs. 0 means all available CPUs")
 	b.grpcRead = cmdBenchmark.Flag.Bool("grpcRead", false, "use grpc API to read")
+	b.fsync = cmdBenchmark.Flag.Bool("fsync", false, "flush data to disk after write")
 	sharedBytes = make([]byte, 1024)
 }
 
@@ -127,7 +129,7 @@ func runBenchmark(cmd *Command, args []string) bool {
 		defer pprof.StopCPUProfile()
 	}
 
-	b.masterClient = wdclient.NewMasterClient(b.grpcDialOption, "client", 0, strings.Split(*b.masters, ","))
+	b.masterClient = wdclient.NewMasterClient(b.grpcDialOption, "client", "", 0, strings.Split(*b.masters, ","))
 	go b.masterClient.KeepConnectedToMaster()
 	b.masterClient.WaitUntilConnected()
 
@@ -227,9 +229,10 @@ func writeFiles(idChan chan int, fileIdLineChan chan string, s *stat) {
 		start := time.Now()
 		fileSize := int64(*b.fileSize + random.Intn(64))
 		fp := &operation.FilePart{
-			Reader:   &FakeReader{id: uint64(id), size: fileSize},
+			Reader:   &FakeReader{id: uint64(id), size: fileSize, random: random},
 			FileSize: fileSize,
 			MimeType: "image/bench", // prevent gzip benchmark content
+			Fsync: *b.fsync,
 		}
 		ar := &operation.VolumeAssignRequest{
 			Count:       1,
@@ -550,8 +553,9 @@ func (s *stats) printStats() {
 
 // a fake reader to generate content to upload
 type FakeReader struct {
-	id   uint64 // an id number
-	size int64  // max bytes
+	id     uint64 // an id number
+	size   int64  // max bytes
+	random *rand.Rand
 }
 
 func (l *FakeReader) Read(p []byte) (n int, err error) {
@@ -567,6 +571,7 @@ func (l *FakeReader) Read(p []byte) (n int, err error) {
 		for i := 0; i < 8; i++ {
 			p[i] = byte(l.id >> uint(i*8))
 		}
+		l.random.Read(p[8:])
 	}
 	l.size -= int64(n)
 	return
